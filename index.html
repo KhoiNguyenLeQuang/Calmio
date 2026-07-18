@@ -398,6 +398,31 @@
     </div>
   </section>
 
+  <!-- ======= Garden (students) ======= -->
+  <section class="view" id="view-garden">
+    <div class="card" style="max-width:900px;margin:0 auto">
+      <h1>Your garden</h1>
+      <p class="muted">A quiet corner that grows with you. Every day you look after yourself here - writing, appreciating someone, booking time to talk - you earn water for your flowers. There is no losing and no hurry: a thirsty flower simply waits for you.</p>
+
+      <div class="garden-wrap" id="garden-scene"></div>
+
+      <div class="garden-bar">
+        <div class="garden-stats">
+          <div class="gstat"><span class="tiny">Water</span><b id="gw-balance">0</b></div>
+          <div class="gstat"><span class="tiny">Earned today</span><b id="gw-earned">0 / 0</b></div>
+          <div class="gstat"><span class="tiny">Flowers</span><b id="gw-count">1</b></div>
+        </div>
+        <button class="btn" id="gw-water-btn" onclick="app.waterGarden()">Water the garden</button>
+      </div>
+
+      <h2 style="margin-top:24px">How to earn water today</h2>
+      <div id="garden-earn"></div>
+
+      <h2 style="margin-top:24px">Flowers you've discovered</h2>
+      <div class="garden-collection" id="garden-collection"></div>
+    </div>
+  </section>
+
   <!-- ======= Footer (every page) ======= -->
   <footer class="site-footer">
     <span>Calmio - a calm space for students.</span>
@@ -529,6 +554,21 @@
     <button class="btn" onclick="app.unlock()">Unlock</button>
     <button class="linklike" onclick="app.logoutFromLock()">Sign out instead</button>
     <p class="tiny" id="lock-msg" style="color:var(--signal)"></p>
+  </div>
+</div>
+
+<!-- ======= New flower reveal (item-drop style) ======= -->
+<div class="modal-backdrop reveal-backdrop" id="reveal-backdrop">
+  <div class="reveal-stage" role="dialog" aria-modal="true" aria-labelledby="reveal-name">
+    <div class="reveal-rays" aria-hidden="true"></div>
+    <div class="reveal-sparkles" aria-hidden="true">
+      <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+    </div>
+    <div class="reveal-flower" id="reveal-flower"></div>
+    <p class="reveal-kicker">A new flower!</p>
+    <h2 id="reveal-name"></h2>
+    <p class="muted" id="reveal-sub"></p>
+    <button class="btn" onclick="app.plantReveal()">Plant it in your garden</button>
   </div>
 </div>
 

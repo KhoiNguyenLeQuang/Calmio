@@ -1,7 +1,35 @@
+/* ============================================================
+   Calmio - app logic
+
+   Security model (client-side, defense in depth):
+   - ALL app data is encrypted at rest with AES-256-GCM before it
+     touches localStorage. The encryption key is a NON-EXTRACTABLE
+     WebCrypto key kept in IndexedDB, so the key material itself can
+     never be read out as bytes. Anyone who copies localStorage gets
+     only ciphertext.
+   - Passwords are never stored: only a salted PBKDF2-SHA256 hash
+     (150,000 rounds). Old SHA-256 hashes are upgraded silently on
+     the next successful sign-in.
+   - 5 failed sign-ins -> 60-second lockout (stops password guessing)
+   - Auto-lock after N minutes of inactivity
+   - Every piece of user text is escaped before rendering (XSS), and
+     a strict Content-Security-Policy in index.html blocks foreign
+     scripts and blocks data from being sent to any other domain.
+
+   NOTE: true protection for a real school deployment still requires
+   a server (see README). This file makes the browser copy of the
+   data as hard to steal as a static site can.
+   ============================================================ */
+
+/* ---------------- Encrypted vault ----------------
+   One encrypted blob (calmio_vault) holds every store. Reads and
+   writes go through an in-memory cache so the rest of the app can
+   stay synchronous; the cache is re-encrypted and persisted after
+   every write. */
 const VAULT_STORES = [
   "calmio_users", "calmio_articles", "calmio_thoughts", "calmio_loves",
   "calmio_slots", "calmio_testimonials", "calmio_feedback",
-  "calmio_settings", "calmio_lockouts", "calmio_notes", "calmio_reports"
+  "calmio_settings", "calmio_lockouts", "calmio_notes", "calmio_reports", "calmio_garden"
 ];
 
 const Vault = {
@@ -650,6 +678,7 @@ const app = {
     this._lastActivity = now();
     this.buildNav();
     this.backHome();
+    this.creditWater("login");
   },
 
   renderAvatar() {
@@ -663,7 +692,7 @@ const app = {
   buildNav() {
     const nav = document.getElementById("mainnav");
     const links = this.me.role === "student"
-      ? [["Home", "student-home"], ["Share", "share"], ["Schedule", "schedule"], ["Articles", "articles"]]
+      ? [["Home", "student-home"], ["Share", "share"], ["Schedule", "schedule"], ["Garden", "garden"], ["Articles", "articles"]]
       : this.me.role === "teacher"
       ? [["Home", "teacher-home"], ["Students", "students"], ["Share love", "share"], ["Articles", "articles"], ["AI Helper", "ai"]]
       : [["School settings", "admin-home"], ["Articles", "articles"]];
@@ -692,6 +721,7 @@ const app = {
     if (view === "schedule")     this.renderSchedule();
     if (view === "account")      this.renderAccount();
     if (view === "students")     this.renderStudents();
+    if (view === "garden")       this.renderGarden();
     if (view === "welcome")      this.renderTestimonials();
     window.scrollTo(0, 0);
   },
@@ -1107,6 +1137,7 @@ const app = {
                  start: startMs, minutes: 60, bookedBy: this.me.id, bookedName: this.me.name });
     DB.write("calmio_slots", slots);
     this.toast("Session booked with " + (teacher ? teacher.name : "your counselor") + ".");
+    this.creditWater("booking");
     this.renderWeek();
     this.renderMySessions();
   },
@@ -1180,6 +1211,7 @@ const app = {
     DB.write("calmio_thoughts", thoughts);
     document.getElementById("thought-body").value = "";
     this.toast("Sent privately to the counseling team. Thank you for sharing.");
+    this.creditWater("journal");
     this.backHome();
     if (ev.risk) this.openCheckin();   // message still reaches the counselors either way
   },
@@ -1198,6 +1230,7 @@ const app = {
     DB.write("calmio_loves", loves);
     document.getElementById("love-reason").value = "";
     this.toast("Love sent.");
+    this.creditWater("love");
     this.backHome();
   },
 
@@ -1438,6 +1471,9 @@ const app = {
     delete notes["user:" + myId];
     delete notes["anon:" + myId];
     DB.write("calmio_notes", notes);
+    const gardens = DB.read("calmio_garden", {});
+    delete gardens[myId];
+    DB.write("calmio_garden", gardens);
     sessionStorage.removeItem("calmio_session");
 
     this.closeDelete();
@@ -1577,6 +1613,388 @@ const app = {
     return "Here's a frame that works for most situations: (1) listen first and reflect back what you heard, (2) ask what would help before prescribing, (3) make one small, fair accommodation if appropriate, and (4) involve the school counselor whenever something feels heavier than a classroom issue. Want to give me more detail about the situation?";
   }
 };
+
+
+/* =====================================================================
+   THE GARDEN - a gentle flower-growing game for students
+   ---------------------------------------------------------------------
+   - The garden starts with one small sprout; the pond, tree and fence
+     are already there.
+   - Each flower takes GROW_DAYS watered days to go sprout -> bloom.
+     When it blooms you receive a NEW random flower (item-drop reveal),
+     planted at a random free spot.
+   - Watering costs 1 water per flower per day (2 flowers = 2 water...).
+   - Earning (base, week 1): login 0.2 / journal 1 / love 0.4 / booking 0.4.
+     Rates double each week up to x8 (week 4+). Daily earning is capped
+     at flowers + GARDEN_CAP_BONUS.
+     Tuning: with x8 a journal entry alone covers watering until the
+     garden reaches 9 flowers (~2 months of steady care); after that
+     you top up with login, love and booking.
+   - Nothing ever dies. An unwatered flower simply waits.
+   ===================================================================== */
+
+const GARDEN_BASE = { login: 0.2, journal: 1, love: 0.4, booking: 0.4 };
+const GARDEN_EARN_LABELS = {
+  login: "Visit Calmio (daily)", journal: "Write a journal entry (Share your thoughts)",
+  love: "Send someone appreciation", booking: "Book a session with a counselor"
+};
+const GARDEN_CAP_BONUS = 2;
+const GARDEN_MAX_MULT = 8;
+const GROW_DAYS = 7;
+
+/* 18 species across 9 head shapes - colors are [petal, petal-deep, center] */
+const FLOWER_SPECIES = [
+  { name: "Sunbeam Daisy",     shape: "daisy",   c: ["#ffffff", "#f2ead8", "#e8b64c"] },
+  { name: "Blush Daisy",       shape: "daisy",   c: ["#f3c1cd", "#e39cae", "#e8b64c"] },
+  { name: "Rosewood Tulip",    shape: "tulip",   c: ["#d96a80", "#b84a62", "#9c3a50"] },
+  { name: "Honey Tulip",       shape: "tulip",   c: ["#eaa64f", "#d18434", "#b06a22"] },
+  { name: "Peony Cloud",       shape: "pom",     c: ["#f2b9c6", "#e290a6", "#d17690"] },
+  { name: "Marigold Puff",     shape: "pom",     c: ["#f0a83e", "#dd8b25", "#c47512"] },
+  { name: "Little Sun",        shape: "sun",     c: ["#f3c141", "#e0a92b", "#7a5230"] },
+  { name: "Evening Poppy",     shape: "poppy",   c: ["#e2593f", "#c43e28", "#3d332a"] },
+  { name: "Coral Poppy",       shape: "poppy",   c: ["#ef8a63", "#dc6b42", "#6e4534"] },
+  { name: "Quiet Lavender",    shape: "spike",   c: ["#a58fc7", "#8a70b3", "#6d5596"] },
+  { name: "Meadow Sage",       shape: "spike",   c: ["#7f9bd1", "#6280bb", "#4d68a3"] },
+  { name: "Morning Bluebell",  shape: "bell",    c: ["#8ea6dd", "#7189c6", "#5871ad"] },
+  { name: "Snowdrop Bell",     shape: "bell",    c: ["#f6f3ea", "#dcd6c6", "#b9d08b"] },
+  { name: "Star Lily",         shape: "star",    c: ["#f4e9f2", "#e3c8de", "#d9a441"] },
+  { name: "Apricot Lily",      shape: "star",    c: ["#f4c39a", "#e8a670", "#c47512"] },
+  { name: "Hydrangea Whisper", shape: "cluster", c: ["#b6c6e8", "#93a8d8", "#7b91c6"] },
+  { name: "Lilac Whisper",     shape: "cluster", c: ["#cdb2dd", "#b593cc", "#9d78b8"] },
+  { name: "Forget-me-not",     shape: "cluster", c: ["#9fc0e8", "#7ea7dc", "#e8b64c"] }
+];
+
+/* Planting spots inside the meadow - away from the tree (left), the pond
+   (right) and the fence (back). Ordered so the garden fills prettily. */
+const GARDEN_SPOTS = [
+  [385, 385], [305, 400], [465, 395], [345, 355], [430, 350], [265, 370],
+  [505, 360], [230, 405], [545, 400], [370, 425], [450, 425], [290, 335],
+  [485, 330], [220, 340], [550, 335], [255, 425], [525, 425], [325, 315],
+  [415, 312], [560, 440], [200, 380], [585, 315], [355, 300], [470, 300],
+  [610, 425], [195, 315], [640, 300], [300, 300]
+];
+
+const gToday = () => new Date().toLocaleDateString("en-CA");   // YYYY-MM-DD
+const r1 = v => Math.round(v * 10) / 10;
+
+/* ---------- drawing ---------- */
+function flowerHead(shape, c, r) {
+  const [p, pd, ctr] = c;
+  let out = "";
+  if (shape === "daisy") {
+    for (let i = 0; i < 9; i++)
+      out += `<ellipse rx="${r * 0.34}" ry="${r}" fill="${i % 2 ? p : pd}" transform="rotate(${i * 40}) translate(0 ${-r * 0.72})"/>`;
+    out += `<circle r="${r * 0.42}" fill="${ctr}"/>`;
+  } else if (shape === "tulip") {
+    out += `<path d="M${-r} ${r * 0.4} Q${-r} ${-r} 0 ${-r * 1.1} Q${r} ${-r} ${r} ${r * 0.4} Q${r * 0.5} ${r} 0 ${r} Q${-r * 0.5} ${r} ${-r} ${r * 0.4}Z" fill="${p}"/>`;
+    out += `<path d="M${-r * 0.45} ${-r * 0.7} L${-r * 0.2} ${r * 0.6} M${r * 0.45} ${-r * 0.7} L${r * 0.2} ${r * 0.6}" stroke="${pd}" stroke-width="${r * 0.14}" fill="none" stroke-linecap="round"/>`;
+  } else if (shape === "pom") {
+    out += `<circle r="${r}" fill="${pd}"/><circle r="${r * 0.72}" fill="${p}" cx="${-r * 0.1}" cy="${-r * 0.12}"/><circle r="${r * 0.4}" fill="${pd}" cx="${r * 0.08}" cy="${-r * 0.05}" opacity="0.55"/><circle r="${r * 0.2}" fill="${p}"/>`;
+  } else if (shape === "sun") {
+    for (let i = 0; i < 12; i++)
+      out += `<path d="M0 0 L${-r * 0.22} ${-r * 0.8} Q0 ${-r * 1.25} ${r * 0.22} ${-r * 0.8} Z" fill="${i % 2 ? p : pd}" transform="rotate(${i * 30})"/>`;
+    out += `<circle r="${r * 0.5}" fill="${ctr}"/><circle r="${r * 0.5}" fill="none" stroke="${p}" stroke-width="${r * 0.06}" opacity="0.5"/>`;
+  } else if (shape === "poppy") {
+    for (let i = 0; i < 4; i++)
+      out += `<circle r="${r * 0.62}" fill="${i % 2 ? p : pd}" opacity="0.92" transform="rotate(${45 + i * 90}) translate(0 ${-r * 0.42})"/>`;
+    out += `<circle r="${r * 0.3}" fill="${ctr}"/>`;
+  } else if (shape === "star") {
+    for (let i = 0; i < 6; i++)
+      out += `<ellipse rx="${r * 0.3}" ry="${r}" fill="${i % 2 ? p : pd}" transform="rotate(${i * 60}) translate(0 ${-r * 0.6})"/>`;
+    out += `<circle r="${r * 0.26}" fill="${ctr}"/>`;
+  } else if (shape === "cluster") {
+    const pts = [[0, -r * 0.9], [-r * 0.7, -r * 0.4], [r * 0.7, -r * 0.4], [-r * 0.45, r * 0.25], [r * 0.45, r * 0.25], [0, -r * 0.15], [0, r * 0.7]];
+    pts.forEach(([x, y], i) => { out += `<circle cx="${x}" cy="${y}" r="${r * 0.42}" fill="${i % 2 ? p : pd}"/>`; });
+    out += `<circle r="${r * 0.14}" fill="${ctr}"/>`;
+  }
+  return out;
+}
+
+/* A flower at a growth stage. Drawn with its roots at (0,0), growing upward. */
+function flowerSVG(f, big) {
+  const sp = FLOWER_SPECIES[f.sp % FLOWER_SPECIES.length];
+  const stage = f.mature || f.watered >= GROW_DAYS ? 3 : f.watered >= 5 ? 2 : f.watered >= 2 ? 1 : 0;
+  const stem = "#5f8a52", leaf = "#74a15f";
+  const H = [10, 20, 30, 38][stage] * (big ? 2.2 : 1);
+  const r = [0, 4, 6.5, 9][stage] * (big ? 2.2 : 1);
+  let g = `<path d="M0 0 Q${H * 0.08} ${-H * 0.5} 0 ${-H}" stroke="${stem}" stroke-width="${big ? 4 : 2.2}" fill="none" stroke-linecap="round"/>`;
+  g += `<path d="M0 ${-H * 0.35} q${-H * 0.38} ${-H * 0.12} ${-H * 0.42} ${-H * 0.42} q${H * 0.3} ${H * 0.05} ${H * 0.42} ${H * 0.42}" fill="${leaf}"/>`;
+  g += `<path d="M0 ${-H * 0.55} q${H * 0.38} ${-H * 0.1} ${H * 0.4} ${-H * 0.38} q${-H * 0.3} ${H * 0.03} ${-H * 0.4} ${H * 0.38}" fill="${leaf}"/>`;
+  if (stage === 0) {
+    g += `<circle cx="0" cy="${-H}" r="${big ? 5 : 2.4}" fill="${leaf}"/>`;
+  } else if (stage === 1) {
+    g += `<ellipse cx="0" cy="${-H - r * 0.5}" rx="${r * 0.55}" ry="${r * 0.85}" fill="${sp.c[1]}"/><path d="M${-r * 0.4} ${-H} Q0 ${-H - r * 1.4} ${r * 0.4} ${-H}" fill="${sp.c[0]}" opacity="0.7"/>`;
+  } else if (sp.shape === "spike") {
+    for (let i = 0; i < 6; i++)
+      g += `<ellipse cx="${(i % 2 ? 1 : -1) * r * 0.28}" cy="${-H + r * 0.5 - i * r * 0.42}" rx="${r * 0.34}" ry="${r * 0.26}" fill="${i % 2 ? sp.c[0] : sp.c[1]}"/>`;
+  } else if (sp.shape === "bell") {
+    for (const [dx, dy] of [[-r * 0.55, 0], [r * 0.55, -r * 0.3], [0, -r * 0.7]])
+      g += `<path transform="translate(${dx} ${-H + dy})" d="M${-r * 0.38} 0 Q${-r * 0.42} ${-r * 0.75} 0 ${-r * 0.75} Q${r * 0.42} ${-r * 0.75} ${r * 0.38} 0 L${r * 0.24} ${r * 0.18} L0 ${r * 0.02} L${-r * 0.24} ${r * 0.18} Z" fill="${sp.c[0]}" stroke="${sp.c[1]}" stroke-width="0.6"/>`;
+  } else {
+    g += `<g transform="translate(0 ${-H - r * 0.35}) rotate(${f.rot || 0})">${flowerHead(sp.shape, sp.c, r)}</g>`;
+  }
+  if (stage === 3 && !big) g += `<circle cx="${r * 0.9}" cy="${-H - r * 1.1}" r="1.3" fill="#fff" opacity="0.85" class="gtwinkle"/>`;
+  return g;
+}
+
+/* The garden scene: warm sky, fence, tree, bushes, pond with koi, meadow. */
+function gardenScene(flowersMarkup) {
+  return `
+<svg viewBox="0 0 900 470" class="garden-svg" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Your garden">
+  <defs>
+    <linearGradient id="gsky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8eedd"/><stop offset="0.7" stop-color="#f6efdd"/><stop offset="1" stop-color="#f3ead5"/>
+    </linearGradient>
+    <linearGradient id="ggrass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a9c48c"/><stop offset="1" stop-color="#b8cf9c"/>
+    </linearGradient>
+    <radialGradient id="gpond" cx="0.5" cy="0.4" r="0.8">
+      <stop offset="0" stop-color="#c2dde4"/><stop offset="0.7" stop-color="#9dc4d1"/><stop offset="1" stop-color="#83aebd"/>
+    </radialGradient>
+    <radialGradient id="gsun" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#f6dfa2" stop-opacity="0.9"/><stop offset="1" stop-color="#f6dfa2" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="900" height="470" fill="url(#gsky)"/>
+  <circle cx="760" cy="72" r="86" fill="url(#gsun)" class="gsun"/>
+  <circle cx="760" cy="72" r="30" fill="#f3d488" opacity="0.9"/>
+
+  <g class="gcloud gcloud1" opacity="0.85">
+    <ellipse cx="180" cy="70" rx="52" ry="17" fill="#fdfaf2"/><ellipse cx="220" cy="60" rx="38" ry="14" fill="#fdfaf2"/><ellipse cx="145" cy="60" rx="30" ry="12" fill="#fdfaf2"/>
+  </g>
+  <g class="gcloud gcloud2" opacity="0.7">
+    <ellipse cx="520" cy="46" rx="44" ry="13" fill="#fdfaf2"/><ellipse cx="552" cy="38" rx="30" ry="11" fill="#fdfaf2"/>
+  </g>
+
+  <!-- meadow -->
+  <path d="M0 250 Q220 225 450 240 Q700 255 900 235 L900 470 L0 470 Z" fill="url(#ggrass)"/>
+  <path d="M0 300 Q300 280 900 300 L900 470 L0 470 Z" fill="#aeca92" opacity="0.6"/>
+
+  <!-- fence along the back -->
+  <g stroke="#c9a878" stroke-width="0" fill="#cfab7d">
+    ${[...Array(15)].map((_, i) => `<rect x="${18 + i * 62}" y="216" width="9" height="42" rx="3"/><path d="M${18 + i * 62} 216 l4.5 -7 l4.5 7 z"/>`).join("")}
+    <rect x="8" y="224" width="884" height="6" rx="3" fill="#c29c6d"/>
+    <rect x="8" y="242" width="884" height="6" rx="3" fill="#c29c6d"/>
+  </g>
+
+  <!-- big tree on the left -->
+  <g class="gtree">
+    <path d="M96 268 Q92 210 104 178 Q110 210 112 268 Z" fill="#8a6647"/>
+    <path d="M100 215 q-18 -8 -26 -24" stroke="#8a6647" stroke-width="7" fill="none" stroke-linecap="round"/>
+    <ellipse cx="66" cy="168" rx="46" ry="38" fill="#7fa46f"/>
+    <ellipse cx="118" cy="140" rx="56" ry="46" fill="#8db37c"/>
+    <ellipse cx="160" cy="176" rx="42" ry="34" fill="#77a066"/>
+    <circle cx="96" cy="150" r="4" fill="#e6a1b2"/><circle cx="132" cy="128" r="4" fill="#e6a1b2"/><circle cx="150" cy="162" r="3.4" fill="#e6a1b2"/>
+  </g>
+
+  <!-- bushes -->
+  <ellipse cx="270" cy="256" rx="40" ry="18" fill="#93b47c"/>
+  <ellipse cx="330" cy="260" rx="30" ry="14" fill="#a0bf89"/>
+  <ellipse cx="850" cy="258" rx="46" ry="18" fill="#93b47c"/>
+
+  <!-- pond -->
+  <g>
+    <ellipse cx="712" cy="368" rx="158" ry="62" fill="#8fae86"/>
+    <ellipse cx="712" cy="364" rx="148" ry="55" fill="url(#gpond)"/>
+    <ellipse cx="680" cy="350" rx="60" ry="16" fill="#ffffff" opacity="0.25"/>
+    <ellipse class="gripple gr1" cx="712" cy="364" rx="30" ry="10" fill="none" stroke="#eaf4f6" stroke-width="1.6"/>
+    <ellipse class="gripple gr2" cx="760" cy="378" rx="22" ry="8"  fill="none" stroke="#eaf4f6" stroke-width="1.4"/>
+    <g class="gkoi">
+      <g><ellipse rx="14" ry="5.5" fill="#e2724c"/><path d="M-13 0 L-21 -5 L-21 5 Z" fill="#e2724c"/><circle cx="7" cy="-1.5" r="1.2" fill="#3d332a"/><ellipse cx="-2" cy="0" rx="4" ry="5" fill="#fdfaf2" opacity="0.8"/>
+        <animateMotion dur="17s" repeatCount="indefinite" rotate="auto" path="M640,356 C700,336 790,346 806,372 C790,394 690,392 648,378 C630,370 626,362 640,356 Z"/></g>
+    </g>
+    <g class="gkoi">
+      <g><ellipse rx="11" ry="4.5" fill="#f0c987"/><path d="M-10 0 L-17 -4 L-17 4 Z" fill="#f0c987"/><circle cx="5.5" cy="-1.2" r="1" fill="#3d332a"/>
+        <animateMotion dur="23s" repeatCount="indefinite" rotate="auto" path="M780,382 C720,398 660,388 646,368 C666,350 750,346 788,362 C800,370 798,378 780,382 Z"/></g>
+    </g>
+    <g transform="translate(636 340)"><ellipse rx="16" ry="6" fill="#6f9e63"/><path d="M0 0 L12 -3 L10 2 Z" fill="#f3ead5"/></g>
+    <g transform="translate(792 350)"><ellipse rx="13" ry="5" fill="#6f9e63"/><g transform="translate(0 -6)">${flowerHead("star", ["#f2c7d4", "#e5a4b8", "#e8b64c"], 6)}</g></g>
+  </g>
+
+  <!-- stones + grass tufts -->
+  <ellipse cx="205" cy="285" rx="14" ry="7" fill="#c9c2b4"/><ellipse cx="228" cy="290" rx="9" ry="5" fill="#d6cfc0"/>
+  <ellipse cx="600" cy="450" rx="16" ry="7" fill="#c9c2b4"/>
+  ${[[250, 300], [430, 285], [560, 295], [180, 440], [660, 448], [90, 330], [140, 390]].map(([x, y]) =>
+    `<path d="M${x} ${y} q-3 -10 -6 -12 M${x} ${y} q0 -12 1 -14 M${x} ${y} q4 -9 7 -11" stroke="#87a86e" stroke-width="2" fill="none" stroke-linecap="round"/>`).join("")}
+
+  <!-- butterflies -->
+  <g class="gbfly gb1"><g class="gwings"><ellipse cx="-4" cy="0" rx="4.5" ry="3.2" fill="#e6a1b2"/><ellipse cx="4" cy="0" rx="4.5" ry="3.2" fill="#e6a1b2"/><rect x="-0.8" y="-3" width="1.6" height="6" rx="0.8" fill="#6e4534"/></g></g>
+  <g class="gbfly gb2"><g class="gwings"><ellipse cx="-4" cy="0" rx="4" ry="2.8" fill="#d9a441"/><ellipse cx="4" cy="0" rx="4" ry="2.8" fill="#d9a441"/><rect x="-0.7" y="-2.6" width="1.4" height="5.2" rx="0.7" fill="#6e4534"/></g></g>
+
+  <!-- flowers -->
+  <g id="garden-flowers">${flowersMarkup}</g>
+</svg>`;
+}
+
+Object.assign(app, {
+  /* ---------- garden data ---------- */
+  gardenFor() {
+    const map = DB.read("calmio_garden", {});
+    let g = map[this.me.id];
+    if (!g) {
+      g = {
+        start: now(), water: 1, flowers: [this._newFlower(0)],
+        discovered: [], earnedDate: "", earnedToday: 0, credited: {}, wateredDate: ""
+      };
+      g.discovered.push(g.flowers[0].sp);
+      map[this.me.id] = g;
+      DB.write("calmio_garden", map);
+    }
+    return g;
+  },
+  gardenSave(g) {
+    const map = DB.read("calmio_garden", {});
+    map[this.me.id] = g;
+    DB.write("calmio_garden", map);
+  },
+  _newFlower(spotIdx) {
+    return {
+      id: uid(), sp: Math.floor(Math.random() * FLOWER_SPECIES.length),
+      rot: Math.floor(Math.random() * 21) - 10,
+      spot: spotIdx % GARDEN_SPOTS.length, watered: 0, mature: false, born: now()
+    };
+  },
+  gardenMult(g) {
+    const weeks = Math.floor((now() - g.start) / (7 * 864e5));
+    return Math.min(GARDEN_MAX_MULT, Math.pow(2, weeks));
+  },
+  gardenCap(g) { return g.flowers.length + GARDEN_CAP_BONUS; },
+
+  /* ---------- earning ---------- */
+  creditWater(kind) {
+    if (!this.me || this.me.role !== "student" || !GARDEN_BASE[kind]) return;
+    const g = this.gardenFor();
+    const t = gToday();
+    if (g.credited[kind] === t) return;
+    if (g.earnedDate !== t) { g.earnedDate = t; g.earnedToday = 0; }
+    const room = Math.max(0, this.gardenCap(g) - g.earnedToday);
+    const amt = r1(Math.min(room, GARDEN_BASE[kind] * this.gardenMult(g)));
+    g.credited[kind] = t;
+    if (amt > 0) {
+      g.water = r1(g.water + amt);
+      g.earnedToday = r1(g.earnedToday + amt);
+      this.gardenSave(g);
+      setTimeout(() => this.toast(`+${amt} water for your garden`), 600);
+    } else this.gardenSave(g);
+  },
+
+  /* ---------- rendering ---------- */
+  renderGarden() {
+    const g = this.gardenFor();
+    const t = gToday();
+    const flowers = g.flowers.map((f, i) => {
+      const [x, y] = GARDEN_SPOTS[f.spot % GARDEN_SPOTS.length];
+      const scale = 0.68 + Math.max(0, Math.min(1, (y - 295) / 135)) * 0.5;
+      const pop = this._justPlanted === f.id ? " gpop" : "";
+      return `<g transform="translate(${x} ${y}) scale(${scale.toFixed(2)})"><g class="gflower${pop}" style="animation-delay:${(i * 0.7) % 4}s">${flowerSVG(f)}</g></g>`;
+    }).join("");
+    this._justPlanted = null;
+    document.getElementById("garden-scene").innerHTML = gardenScene(flowers);
+
+    if (g.earnedDate !== t) { g.earnedDate = t; g.earnedToday = 0; this.gardenSave(g); }
+    document.getElementById("gw-balance").textContent = g.water;
+    document.getElementById("gw-earned").textContent = `${g.earnedToday} / ${this.gardenCap(g)}`;
+    document.getElementById("gw-count").textContent = g.flowers.length;
+
+    const btn = document.getElementById("gw-water-btn");
+    const need = g.flowers.length;
+    if (g.wateredDate === t) {
+      btn.disabled = true;
+      btn.textContent = "Watered today - see you tomorrow";
+    } else {
+      btn.disabled = false;
+      btn.textContent = `Water the garden (uses ${need} water)`;
+    }
+
+    const mult = this.gardenMult(g);
+    document.getElementById("garden-earn").innerHTML = Object.keys(GARDEN_BASE).map(k => `
+      <div class="earn-row${g.credited[k] === t ? " done" : ""}">
+        <span class="earn-check">${g.credited[k] === t ? "&#10003;" : ""}</span>
+        <span>${GARDEN_EARN_LABELS[k]}</span>
+        <b>+${r1(GARDEN_BASE[k] * mult)}</b>
+      </div>`).join("") +
+      `<p class="tiny" style="margin-top:8px">Values grow as your garden gets older (currently x${mult}). You can earn up to ${this.gardenCap(g)} water a day - your flowers drink ${need} a day, so a journal entry goes a long way.</p>`;
+
+    const disc = [...new Set(g.discovered)];
+    document.getElementById("garden-collection").innerHTML =
+      `<p class="tiny">${disc.length} of ${FLOWER_SPECIES.length} kinds</p>` +
+      `<div class="coll-grid">` + FLOWER_SPECIES.map((sp, i) => disc.includes(i)
+        ? `<div class="coll-item" title="${sp.name}"><svg viewBox="-16 -46 32 50">${flowerSVG({ sp: i, watered: GROW_DAYS, rot: 0 })}</svg><span>${sp.name}</span></div>`
+        : `<div class="coll-item unknown"><svg viewBox="-16 -46 32 50"><text x="0" y="-14" text-anchor="middle" font-size="20" fill="#c9beac">?</text></svg><span>?</span></div>`).join("") + `</div>`;
+  },
+
+  /* ---------- watering ---------- */
+  waterGarden() {
+    const g = this.gardenFor();
+    const t = gToday();
+    if (g.wateredDate === t) { this.toast("The garden has had its water today. Come back tomorrow."); return; }
+    const need = g.flowers.length;
+    if (g.water < need) {
+      this.toast(`You need ${r1(need - g.water)} more water - a journal entry or a kind note will do it.`);
+      return;
+    }
+    g.water = r1(g.water - need);
+    g.wateredDate = t;
+    const grow = g.flowers.find(f => !f.mature);
+    let bloomed = false;
+    if (grow) {
+      grow.watered++;
+      if (grow.watered >= GROW_DAYS) { grow.mature = true; bloomed = true; }
+    }
+    this.gardenSave(g);
+    this.renderGarden();
+    this._waterFx();
+    if (bloomed) setTimeout(() => this._awardFlower(), 1500);
+    else this.toast("Watered. Your garden is grateful.");
+  },
+
+  _waterFx() {
+    const wrap = document.getElementById("garden-scene");
+    const fx = document.createElement("div");
+    fx.className = "water-fx";
+    for (let i = 0; i < 14; i++) {
+      const d = document.createElement("i");
+      d.style.left = (8 + Math.random() * 84) + "%";
+      d.style.animationDelay = (Math.random() * 0.7) + "s";
+      fx.appendChild(d);
+    }
+    wrap.appendChild(fx);
+    setTimeout(() => fx.remove(), 1900);
+  },
+
+  /* ---------- new-flower reveal ---------- */
+  _awardFlower() {
+    const g = this.gardenFor();
+    const undisc = FLOWER_SPECIES.map((_, i) => i).filter(i => !g.discovered.includes(i));
+    const sp = undisc.length && Math.random() < 0.8
+      ? undisc[Math.floor(Math.random() * undisc.length)]
+      : Math.floor(Math.random() * FLOWER_SPECIES.length);
+    const f = this._newFlower(g.flowers.length);
+    f.sp = sp;
+    this._pendingFlower = f;
+    document.getElementById("reveal-flower").innerHTML =
+      `<svg viewBox="-40 -110 80 118">${flowerSVG({ ...f, watered: GROW_DAYS }, true)}</svg>`;
+    document.getElementById("reveal-name").textContent = FLOWER_SPECIES[sp].name;
+    document.getElementById("reveal-sub").textContent =
+      "Your flower bloomed - and left you a seed of something new. It starts as a little sprout.";
+    document.getElementById("reveal-backdrop").classList.add("open");
+  },
+
+  plantReveal() {
+    const f = this._pendingFlower;
+    if (!f) { document.getElementById("reveal-backdrop").classList.remove("open"); return; }
+    this._pendingFlower = null;
+    const g = this.gardenFor();
+    g.flowers.push(f);
+    if (!g.discovered.includes(f.sp)) g.discovered.push(f.sp);
+    this.gardenSave(g);
+    document.getElementById("reveal-backdrop").classList.remove("open");
+    this._justPlanted = f.id;
+    this.renderGarden();
+    this.toast(`${FLOWER_SPECIES[f.sp].name} planted. It drinks 1 water a day like the others.`);
+  }
+});
 
 /* Boot: open the encrypted vault first, then start the app */
 Vault.init().then(() => app.init());
