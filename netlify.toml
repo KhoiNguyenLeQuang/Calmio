@@ -3,6 +3,10 @@
 [build]
   publish = "."
   functions = "netlify/functions"
+  # Writes js/config.js from the CALMIO_SUPABASE_* environment variables.
+  # If those are not set it does nothing, and the committed js/config.js
+  # is used instead - so this is safe either way.
+  command = "bash netlify/build-config.sh"
 
 [[redirects]]
   from = "/api/*"

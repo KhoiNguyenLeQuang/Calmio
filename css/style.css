@@ -240,8 +240,10 @@ nav.mainnav button.active { background: var(--cacao); color: #fff; }
 
 /* Forms */
 label { display: block; font-weight: 700; font-size: 0.9rem; margin: 14px 0 5px; }
-input[type="text"], input[type="url"], input[type="number"], input[type="password"],
-input[type="date"], input[type="time"], input[type="file"], textarea, select {
+/* Every text-like field, defined by exclusion so a new input type
+   (email, search, tel...) can never be accidentally left unstyled. */
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="button"]):not([type="submit"]),
+textarea, select {
   width: 100%;
   border: 1.5px solid var(--oat-line);
   border-radius: var(--radius-sm);
