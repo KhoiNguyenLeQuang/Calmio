@@ -1,0 +1,10 @@
+# Netlify configuration for Calmio.
+# Deploy the whole calmio folder; /api/chat is served by the function below.
+[build]
+  publish = "."
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200

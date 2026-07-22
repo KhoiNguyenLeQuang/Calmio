@@ -1,0 +1,8 @@
+{
+  "name": "calmio",
+  "private": true,
+  "description": "Calmio - student mental health hub (static site + Netlify functions)",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}

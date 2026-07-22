@@ -124,18 +124,23 @@ const Vault = {
 };
 
 const DB = {
+  /* In remote (Supabase) mode the cache lives in Remote.cache and every
+     write is diffed into row-level operations against the database.
+     In local mode nothing changes: encrypted vault in this browser. */
+  _c() { return Remote.on ? Remote.cache : Vault.cache; },
   read(key, fallback) {
-    const v = Vault.cache[key];
+    const v = this._c()[key];
     if (v === undefined || v === null) return fallback;
     return JSON.parse(JSON.stringify(v));           // hand out copies, never live refs
   },
   write(key, value) {
-    Vault.cache[key] = JSON.parse(JSON.stringify(value));
-    Vault.persist();
+    this._c()[key] = JSON.parse(JSON.stringify(value));
+    if (Remote.on) Remote.push(key, value);
+    else Vault.persist();
   },
   remove(key) {
-    delete Vault.cache[key];
-    Vault.persist();
+    delete this._c()[key];
+    if (!Remote.on) Vault.persist();
   }
 };
 
@@ -214,16 +219,37 @@ const newSalt = () => uid() + uid();
 /* ---------- Sign-in lockout (anti brute-force) ---------- */
 const LOCK_MAX_FAILS = 5;
 const LOCK_SECONDS = 60;
-function lockKey(name, role) { return role + "|" + name.trim().toLowerCase(); }
-function getLockout(name, role) {
+function lockKey(id) { return id.trim().toLowerCase(); }
+function getLockout(id) {
   const all = DB.read("calmio_lockouts", {});
-  return all[lockKey(name, role)] || { fails: 0, until: 0 };
+  return all[lockKey(id)] || { fails: 0, until: 0 };
 }
-function setLockout(name, role, rec) {
+function setLockout(id, rec) {
   const all = DB.read("calmio_lockouts", {});
-  all[lockKey(name, role)] = rec;
+  all[lockKey(id)] = rec;
   DB.write("calmio_lockouts", all);
 }
+
+/* Display name: full name if set, else the username */
+const disp = u => (u && (u.display || u.name)) || "";
+
+/* Known school email domains -> school names. Add your school here so the
+   sign-up form fills the school automatically from the email address. */
+const SCHOOL_DOMAINS = {
+  "hanoihigh.edu.vn": "Hanoi High"
+};
+function schoolFromEmail(email) {
+  const at = email.indexOf("@");
+  if (at < 0) return "";
+  const domain = email.slice(at + 1).toLowerCase().trim();
+  if (SCHOOL_DOMAINS[domain]) return SCHOOL_DOMAINS[domain];
+  // Generic guess: strip common suffixes and prettify ("truonghighschool.edu.vn" -> "Truonghighschool")
+  const core = domain.replace(/\.(edu|ac|k12|sch|school)?\.?(vn|com|org|net|edu)$/i, "");
+  if (!core || core.includes(".") || ["gmail", "yahoo", "outlook", "hotmail", "icloud", "proton", "protonmail"].includes(core)) return "";
+  return core.charAt(0).toUpperCase() + core.slice(1);
+}
+const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{2,19}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /* Stable anonymous code name, e.g. #student4271 */
 function newAnonId() {
@@ -233,12 +259,20 @@ function newAnonId() {
   return id;
 }
 
-/* Seed data (first visit only) */
-function seed() {
+/* Seed data (first visit only). Every demo account signs in with the
+   password "Calmio123" - full list in the README. Delete before real use. */
+const DEMO_PASS = "Calmio123";
+async function seed() {
   if (DB.read("calmio_users", null)) return;
-  const t1 = { id: uid(), name: "Dr. Lori",     role: "teacher", profile: {} };
-  const t2 = { id: uid(), name: "Mr. Hart",     role: "teacher", profile: {} };
-  const t3 = { id: uid(), name: "Mrs. Speidel", role: "teacher", profile: {} };
+  const acc = async (name, email, display, role, extra = {}) => {
+    const salt = newSalt();
+    return { id: uid(), name, email, display, role, salt,
+             passHash: await makeHash(DEMO_PASS, salt), profile: {}, ...extra };
+  };
+  const t1 = await acc("dr.lori",     "lori@hanoihigh.edu.vn",    "Dr. Lori",     "teacher");
+  const t2 = await acc("mr.hart",     "hart@hanoihigh.edu.vn",    "Mr. Hart",     "teacher");
+  const t3 = await acc("mrs.speidel", "speidel@hanoihigh.edu.vn", "Mrs. Speidel", "teacher");
+  const a1 = await acc("admin",       "admin@hanoihigh.edu.vn",   "School Administrator", "admin");
   DB.write("calmio_users", [t1, t2, t3]);
   DB.write("calmio_articles", [
     { id: uid(), title: "What to do when a friend is dealing with anxiety?",
@@ -254,25 +288,27 @@ function seed() {
   /* ----- Synthetic demo students (so the Students tab has something to show).
          Delete this block before real use. ----- */
   const D = 864e5;                       // one day in ms
-  const mk = (name, profile) => ({ id: uid(), name, role: "student", profile, anonId: newAnonId() });
-  const s1 = mk("Minh Anh", { fullName: "Nguyen Minh Anh", nickname: "Mia", school: "Hanoi High", className: "11A2", hobbies: "Piano, reading", clubs: "Media club" });
-  const s2 = mk("Duc",      { fullName: "Tran Duc",        nickname: "",    school: "Hanoi High", className: "10B1", hobbies: "Football",       clubs: "Football team" });
-  const s3 = mk("Lan",      { fullName: "Pham Lan",        nickname: "",    school: "Hanoi High", className: "12C3", hobbies: "Drawing",        clubs: "Art club" });
-  const s4 = mk("Khoa",     { fullName: "Le Khoa",         nickname: "",    school: "Hanoi High", className: "11A2", hobbies: "Chess, coding",  clubs: "STEM club" });
-  const s5 = mk("Thu",      { fullName: "Vu Thu",          nickname: "",    school: "Hanoi High", className: "10B2", hobbies: "Badminton",      clubs: "Charity run team" });
-  const s6 = mk("Bao",      { fullName: "Ngo Bao",         nickname: "",    school: "Hanoi High", className: "12A1", hobbies: "Guitar, running",clubs: "Music club" });
-  const s7 = mk("Hana",     { fullName: "Dang Hana",       nickname: "Han", school: "Hanoi High", className: "11C1", hobbies: "Volleyball",     clubs: "Student council" });
-  const s8 = mk("Tuan",     { fullName: "Bui Tuan",        nickname: "",    school: "Hanoi High", className: "10A3", hobbies: "Gaming",         clubs: "" });
-  const s9 = mk("Linh",     { fullName: "Hoang Linh",      nickname: "",    school: "Hanoi High", className: "12B2", hobbies: "Photography",    clubs: "Yearbook team" });
-  DB.write("calmio_users", [t1, t2, t3, s1, s2, s3, s4, s5, s6, s7, s8, s9]);
+  const mk = async (username, display, profile) =>
+    acc(username, username.replace(/[^a-z0-9.]/g, "") + "@hanoihigh.edu.vn", display, "student",
+        { profile, school: "Hanoi High", anonId: newAnonId() });
+  const s1 = await mk("minhanh.nguyen", "Minh Anh", { fullName: "Nguyen Minh Anh", nickname: "Mia", school: "Hanoi High", className: "11A2", hobbies: "Piano, reading", clubs: "Media club" });
+  const s2 = await mk("duc.tran",       "Duc",      { fullName: "Tran Duc",        nickname: "",    school: "Hanoi High", className: "10B1", hobbies: "Football",       clubs: "Football team" });
+  const s3 = await mk("lan.pham",       "Lan",      { fullName: "Pham Lan",        nickname: "",    school: "Hanoi High", className: "12C3", hobbies: "Drawing",        clubs: "Art club" });
+  const s4 = await mk("khoa.le",        "Khoa",     { fullName: "Le Khoa",         nickname: "",    school: "Hanoi High", className: "11A2", hobbies: "Chess, coding",  clubs: "STEM club" });
+  const s5 = await mk("thu.vu",         "Thu",      { fullName: "Vu Thu",          nickname: "",    school: "Hanoi High", className: "10B2", hobbies: "Badminton",      clubs: "Charity run team" });
+  const s6 = await mk("bao.ngo",        "Bao",      { fullName: "Ngo Bao",         nickname: "",    school: "Hanoi High", className: "12A1", hobbies: "Guitar, running",clubs: "Music club" });
+  const s7 = await mk("hana.dang",      "Hana",     { fullName: "Dang Hana",       nickname: "Han", school: "Hanoi High", className: "11C1", hobbies: "Volleyball",     clubs: "Student council" });
+  const s8 = await mk("tuan.bui",       "Tuan",     { fullName: "Bui Tuan",        nickname: "",    school: "Hanoi High", className: "10A3", hobbies: "Gaming",         clubs: "" });
+  const s9 = await mk("linh.hoang",     "Linh",     { fullName: "Hoang Linh",      nickname: "",    school: "Hanoi High", className: "12B2", hobbies: "Photography",    clubs: "Yearbook team" });
+  DB.write("calmio_users", [t1, t2, t3, a1, s1, s2, s3, s4, s5, s6, s7, s8, s9]);
 
   const th = (from, daysAgo, body, mood, opts = {}) => ({
-    id: uid(), fromId: from.id, fromName: from.name, toId: "all",
+    id: uid(), fromId: from.id, fromName: disp(from), toId: "all",
     anonymous: !!opts.anon, urgent: !!opts.urgent, body,
     ts: now() - daysAgo * D, replies: opts.replies || [],
     mood, risk: !!opts.risk
   });
-  const rep = (t, daysAgo, body) => ({ fromId: t.id, name: t.name, body, ts: now() - daysAgo * D });
+  const rep = (t, daysAgo, body) => ({ fromId: t.id, name: t.display, body, ts: now() - daysAgo * D });
 
   DB.write("calmio_thoughts", [
     // Minh Anh - started low with exam stress, clearly improving
@@ -362,6 +398,8 @@ function migrateData() {
   let changed = false;
   for (const u of users) {
     if (u.role === "student" && !u.anonId) { u.anonId = newAnonId(); changed = true; }
+    if (!u.display) { u.display = u.name; changed = true; }
+    if (u.email === undefined) { u.email = ""; changed = true; }
   }
   if (changed) DB.write("calmio_users", users);
 
@@ -374,11 +412,25 @@ function migrateData() {
 }
 
 /* School settings (set by administrators) */
+const DEFAULT_CRISIS_LINES = [
+  { label: "111 - National Child Helpline", sub: "Free, 24/7, for children and teenagers", number: "111" },
+  { label: "115 - Medical emergency", sub: "Ambulance and urgent medical help", number: "115" },
+  { label: "113 - Police", sub: "If someone's safety is at risk right now", number: "113" }
+];
 function getSettings() {
-  return DB.read("calmio_settings", {
+  const s = DB.read("calmio_settings", {
     counselorName: "", counselorOffice: "", counselorPhone: "",
     hoursStart: 8, hoursEnd: 16
   });
+  if (!Array.isArray(s.crisisLines) || !s.crisisLines.length) s.crisisLines = DEFAULT_CRISIS_LINES;
+  return s;
+}
+function crisisLinesHTML() {
+  return getSettings().crisisLines.map(l => `
+    <div class="crisis-line">
+      <div><b>${esc(l.label)}</b>${l.sub ? `<br /><span class="tiny">${esc(l.sub)}</span>` : ""}</div>
+      <a class="call-btn" href="tel:${esc(l.number)}">Call ${esc(l.number)}</a>
+    </div>`).join("");
 }
 
 function isSchoolHours() {
@@ -529,19 +581,28 @@ const app = {
   studentQuery: "",
   _convoFrom: null,      // where the convo view was opened from
 
-  init() {
-    seed();
-    migrateData();
-    // The session lives in sessionStorage only: closing the page/tab wipes it,
-    // so reopening Calmio always asks you to sign in again.
-    const sessionId = sessionStorage.getItem("calmio_session");
-    if (sessionId) {
-      this.me = DB.read("calmio_users", []).find(u => u.id === sessionId) || null;
+  async init() {
+    if (Remote.configure()) {
+      // Multi-user mode: Supabase is the source of truth. Sessions live in
+      // sessionStorage (closing the tab signs you out), restored here.
+      await Remote.init();
+      if (Remote.session) {
+        await Remote.loadAll();
+        this.me = Remote.me();
+      }
+    } else {
+      await seed();
+      migrateData();
+      // The session lives in sessionStorage only: closing the page/tab wipes it,
+      // so reopening Calmio always asks you to sign in again.
+      const sessionId = sessionStorage.getItem("calmio_session");
+      if (sessionId) {
+        this.me = DB.read("calmio_users", []).find(u => u.id === sessionId) || null;
+      }
+      DB.remove("calmio_session");               // clear sessions left behind by older versions
+      try { localStorage.removeItem("calmio_session"); } catch {}
     }
-    DB.remove("calmio_session");                 // clear sessions left behind by older versions
-    try { localStorage.removeItem("calmio_session"); } catch {}
     if (this.me) { this.enter(); } else { this.show("welcome"); }
-    this.pickRole("student");
     this.renderTestimonials();
     this.watchActivity();
     // Build the star-rating buttons for the delete flow
@@ -578,7 +639,7 @@ const app = {
     const pass = document.getElementById("lock-pass").value;
     const msg = document.getElementById("lock-msg");
     if (!this.me) { this.logoutFromLock(); return; }
-    const res = await verifyPass(this.me, pass);
+    const res = Remote.on ? { ok: await Remote.reauth(pass) } : await verifyPass(this.me, pass);
     if (res.ok) {
       if (res.upgraded) this.saveMe();
       this.locked = false;
@@ -596,77 +657,161 @@ const app = {
   },
 
   /* ---------- auth ---------- */
-  pickRole(role) {
-    this.pendingRole = role;
-    document.getElementById("role-student").classList.toggle("active", role === "student");
-    document.getElementById("role-teacher").classList.toggle("active", role === "teacher");
-    document.getElementById("role-admin").classList.toggle("active", role === "admin");
+  authTab(which) {
+    document.getElementById("login-form").hidden = which !== "login";
+    document.getElementById("signup-form").hidden = which !== "signup";
+    document.getElementById("lockout-msg").textContent = "";
+    document.getElementById("signup-msg").textContent = "";
   },
 
-  async login() {
-    const name = document.getElementById("welcome-name").value.trim();
-    const pass = document.getElementById("welcome-pass").value;
-    const lockoutMsg = document.getElementById("lockout-msg");
-    lockoutMsg.textContent = "";
-    if (!name) { this.toast("Please enter your name first."); return; }
+  suggestSchool() {
+    const field = document.getElementById("su-school");
+    const guess = schoolFromEmail(document.getElementById("su-email").value);
+    if (guess && (!field.value.trim() || field.dataset.auto === "1")) {
+      field.value = guess;
+      field.dataset.auto = "1";
+    }
+  },
 
-    // Brute-force lockout check
-    const lock = getLockout(name, this.pendingRole);
-    if (lock.until > now()) {
-      const secs = Math.ceil((lock.until - now()) / 1000);
-      lockoutMsg.textContent = `Too many wrong attempts. Sign-in for this account is paused for ${secs} more seconds.`;
+  /* Sign in with username OR email + password. Accounts are never created here. */
+  async login() {
+    const idRaw = document.getElementById("login-id").value.trim();
+    const pass = document.getElementById("login-pass").value;
+    const msg = document.getElementById("lockout-msg");
+    msg.textContent = "";
+    if (!idRaw || !pass) { msg.textContent = "Enter your username or email and your password."; return; }
+
+    if (Remote.on) {
+      msg.textContent = "Signing in...";
+      const res = await Remote.signIn(idRaw, pass);
+      if (res.error) { msg.textContent = res.error; return; }
+      await Remote.loadAll();
+      this.me = Remote.me();
+      if (!this.me) { msg.textContent = "Signed in, but no profile was found. Ask your administrator."; return; }
+      msg.textContent = "";
+      document.getElementById("login-pass").value = "";
+      this.enter();
       return;
     }
 
-    const users = DB.read("calmio_users", []);
-    let user = users.find(u => u.name.toLowerCase() === name.toLowerCase() && u.role === this.pendingRole);
-
-    if (!user) {
-      // New account - the password typed now becomes theirs
-      if (pass.length < 6) { this.toast("Choose a password of at least 6 characters to create your account."); return; }
-      const salt = newSalt();
-      user = { id: uid(), name, role: this.pendingRole, salt,
-               passHash: await makeHash(pass, salt), profile: {}, lockMinutes: 10 };
-      if (user.role === "student") user.anonId = newAnonId();
-      users.push(user);
-      DB.write("calmio_users", users);
-      this.toast("Account created. Welcome to Calmio.");
-    } else if (!user.passHash) {
-      // Pre-seeded account claiming its password on first sign-in
-      if (pass.length < 6) { this.toast("Set a password of at least 6 characters for this account."); return; }
-      user.salt = newSalt();
-      user.passHash = await makeHash(pass, user.salt);
-      user.profile = user.profile || {};
-      DB.write("calmio_users", users);
-      this.toast("Password set for this account.");
-    } else {
-      // Existing account - verify
-      const res = await verifyPass(user, pass);
-      if (!res.ok) {
-        const fails = lock.fails + 1;
-        if (fails >= LOCK_MAX_FAILS) {
-          setLockout(name, this.pendingRole, { fails: 0, until: now() + LOCK_SECONDS * 1000 });
-          lockoutMsg.textContent = `Wrong password ${LOCK_MAX_FAILS} times - sign-in paused for ${LOCK_SECONDS} seconds to protect this account.`;
-        } else {
-          setLockout(name, this.pendingRole, { fails, until: 0 });
-          lockoutMsg.textContent = `Wrong password (attempt ${fails} of ${LOCK_MAX_FAILS}).`;
-        }
-        return;
-      }
-      if (res.upgraded) DB.write("calmio_users", users);   // silent PBKDF2 upgrade
-      setLockout(name, this.pendingRole, { fails: 0, until: 0 });
+    const lock = getLockout(idRaw);
+    if (lock.until > now()) {
+      const secs = Math.ceil((lock.until - now()) / 1000);
+      msg.textContent = `Too many wrong attempts. Sign-in is paused for ${secs} more seconds.`;
+      return;
     }
 
-    document.getElementById("welcome-pass").value = "";
+    const idLow = idRaw.toLowerCase();
+    const users = DB.read("calmio_users", []);
+    const user = users.find(u =>
+      u.name.toLowerCase() === idLow || (u.email && u.email.toLowerCase() === idLow));
+
+    if (!user || !user.passHash) {
+      // Same message whether the account or the password is wrong,
+      // so the sign-in form can't be used to probe which usernames exist.
+      this._loginFail(idRaw, lock, msg);
+      return;
+    }
+    const res = await verifyPass(user, pass);
+    if (!res.ok) { this._loginFail(idRaw, lock, msg); return; }
+    if (res.upgraded) DB.write("calmio_users", users);
+    setLockout(idRaw, { fails: 0, until: 0 });
+
+    document.getElementById("login-pass").value = "";
     this.me = user;
     sessionStorage.setItem("calmio_session", user.id);
     this.enter();
   },
 
+  _loginFail(id, lock, msg) {
+    const fails = lock.fails + 1;
+    if (fails >= LOCK_MAX_FAILS) {
+      setLockout(id, { fails: 0, until: now() + LOCK_SECONDS * 1000 });
+      msg.textContent = `Wrong sign-in details ${LOCK_MAX_FAILS} times - paused for ${LOCK_SECONDS} seconds.`;
+    } else {
+      setLockout(id, { fails, until: 0 });
+      msg.textContent = `That username/email and password don't match (attempt ${fails} of ${LOCK_MAX_FAILS}).`;
+    }
+  },
+
+  /* Shared checks for any new account (public sign-up and admin-created) */
+  validateNewUser({ username, email, fullname, pass, pass2 }) {
+    if (!USERNAME_RE.test(username))
+      return "Usernames are 3-20 characters: lowercase letters, numbers, dots, dashes or underscores, starting with a letter or number.";
+    if (!EMAIL_RE.test(email)) return "That doesn't look like a valid email address.";
+    if (!fullname) return "Please enter a full name.";
+    if (pass.length < 6) return "Passwords need at least 6 characters.";
+    if (pass2 !== undefined && pass !== pass2) return "The two passwords don't match.";
+    if (!Remote.on) {
+      const users = DB.read("calmio_users", []);
+      if (users.some(u => u.name.toLowerCase() === username)) return "That username is already taken - try another.";
+      if (users.some(u => u.email && u.email.toLowerCase() === email)) return "An account with that email already exists. Try signing in instead.";
+    }
+    return null;
+  },
+
+  /* Public sign-up: creates STUDENT accounts only. */
+  async register() {
+    const msg = document.getElementById("signup-msg");
+    msg.textContent = "";
+    const username = document.getElementById("su-username").value.trim().toLowerCase();
+    const email = document.getElementById("su-email").value.trim().toLowerCase();
+    const fullname = document.getElementById("su-fullname").value.trim();
+    const school = document.getElementById("su-school").value.trim();
+    const pass = document.getElementById("su-pass").value;
+    const pass2 = document.getElementById("su-pass2").value;
+    if (!school) { msg.textContent = "Please enter your school."; return; }
+    if (!document.getElementById("su-agree").checked) { msg.textContent = "Please read and tick the privacy box first."; return; }
+    const err = this.validateNewUser({ username, email, fullname, pass, pass2 });
+    if (err) { msg.textContent = err; return; }
+
+    if (Remote.on) {
+      msg.textContent = "Creating your account...";
+      const res = await Remote.signUp({ username, email, fullname, school, password: pass });
+      if (res.error) { msg.textContent = res.error; return; }
+      if (res.confirm) {
+        msg.style.color = "var(--cacao)";
+        msg.textContent = "Almost there - check your email and click the confirmation link, then sign in.";
+        return;
+      }
+      await Remote.loadAll();
+      // Save the profile bits the sign-up trigger doesn't know about
+      const users = DB.read("calmio_users", []);
+      const mine = users.find(u => u.id === Remote.uid());
+      if (mine) {
+        mine.profile = { ...(mine.profile || {}), fullName: fullname, school };
+        DB.write("calmio_users", users);
+      }
+      this.me = Remote.me();
+      this.toast("Account created. Welcome to Calmio.");
+      this.enter();
+      return;
+    }
+
+    const salt = newSalt();
+    const user = {
+      id: uid(), name: username, email, display: fullname, role: "student",
+      salt, passHash: await makeHash(pass, salt),
+      profile: { fullName: fullname, school }, school,
+      lockMinutes: 10, anonId: newAnonId()
+    };
+    const users = DB.read("calmio_users", []);
+    users.push(user);
+    DB.write("calmio_users", users);
+
+    this.me = user;
+    sessionStorage.setItem("calmio_session", user.id);
+    this.toast("Account created. Welcome to Calmio.");
+    this.enter();
+  },
+
   logout() {
+    if (Remote.on) Remote.signOut();
     sessionStorage.removeItem("calmio_session");
     this.me = null;
     document.getElementById("topbar").hidden = true;
+    this.authTab("login");
+    document.getElementById("login-pass").value = "";
     this.show("welcome");
     this.renderTestimonials();
   },
@@ -674,11 +819,15 @@ const app = {
   enter() {
     document.getElementById("topbar").hidden = false;
     this.renderAvatar();
-    document.getElementById("whoami-name").textContent = this.me.name + " \u00b7 " + this.me.role;
+    document.getElementById("whoami-name").textContent = disp(this.me) + " \u00b7 " + (this.me.role === "teacher" ? "counselor" : this.me.role);
     this._lastActivity = now();
     this.buildNav();
     this.backHome();
     this.creditWater("login");
+    if (Remote.on) Remote.startPolling(() => {
+      this.me = Remote.me() || this.me;
+      if (this._view && this._view !== "welcome") this.show(this._view);
+    });
   },
 
   renderAvatar() {
@@ -686,7 +835,7 @@ const app = {
     const p = this.me.profile || {};
     el.innerHTML = p.photo
       ? `<img src="${p.photo}" alt="" />`
-      : esc(this.me.name.trim()[0].toUpperCase());
+      : esc(disp(this.me).trim()[0].toUpperCase());
   },
 
   buildNav() {
@@ -708,6 +857,7 @@ const app = {
 
   /* ---------- navigation ---------- */
   show(view) {
+    this._view = view;
     document.querySelectorAll(".view").forEach(v => v.classList.remove("visible"));
     document.getElementById("view-" + view).classList.add("visible");
     document.querySelectorAll("#mainnav button").forEach(b =>
@@ -739,7 +889,101 @@ const app = {
     document.getElementById("set-counselor-phone").value = s.counselorPhone;
     document.getElementById("set-hours-start").value = s.hoursStart;
     document.getElementById("set-hours-end").value = s.hoursEnd;
+    this._crisisDraft = s.crisisLines.map(l => ({ ...l }));
+    this.renderCrisisEditor();
+    this.renderTeamList();
     this.renderReports();
+  },
+
+  renderCrisisEditor() {
+    document.getElementById("crisis-editor").innerHTML = this._crisisDraft.map((l, i) => `
+      <div class="crisis-edit-row">
+        <input type="text" value="${esc(l.label)}" placeholder="Name of the line"
+               oninput="app._crisisDraft[${i}].label=this.value" />
+        <input type="text" value="${esc(l.sub || "")}" placeholder="Short note (hours, who it's for)"
+               oninput="app._crisisDraft[${i}].sub=this.value" />
+        <input type="text" value="${esc(l.number)}" placeholder="Phone number" class="crisis-num"
+               oninput="app._crisisDraft[${i}].number=this.value" />
+        <button class="linklike" onclick="app.removeCrisisLine(${i})">Remove</button>
+      </div>`).join("");
+  },
+  addCrisisLine() {
+    this._crisisDraft.push({ label: "", sub: "", number: "" });
+    this.renderCrisisEditor();
+  },
+  removeCrisisLine(i) {
+    this._crisisDraft.splice(i, 1);
+    this.renderCrisisEditor();
+  },
+  saveCrisisLines() {
+    const lines = this._crisisDraft
+      .map(l => ({ label: l.label.trim(), sub: (l.sub || "").trim(), number: l.number.trim() }))
+      .filter(l => l.label && l.number);
+    if (!lines.length) { this.toast("Keep at least one crisis line - students rely on this page."); return; }
+    const s = getSettings();
+    s.crisisLines = lines;
+    DB.write("calmio_settings", s);
+    this._crisisDraft = lines.map(l => ({ ...l }));
+    this.renderCrisisEditor();
+    this.toast("Crisis lines saved.");
+  },
+
+  async createTeamAccount() {
+    const username = document.getElementById("ta-username").value.trim().toLowerCase();
+    const email = document.getElementById("ta-email").value.trim().toLowerCase();
+    const fullname = document.getElementById("ta-fullname").value.trim();
+    const role = document.getElementById("ta-role").value;
+    const pass = document.getElementById("ta-pass").value;
+    const err = this.validateNewUser({ username, email, fullname, pass });
+    if (err) { this.toast(err); return; }
+    if (Remote.on) {
+      this.toast("Creating the account...");
+      const res = await Remote.staff({ action: "create", username, email, fullname, role, password: pass });
+      if (res.error) { this.toast(res.error); return; }
+      await Remote.loadAll();
+      ["ta-username", "ta-email", "ta-fullname", "ta-pass"].forEach(i => document.getElementById(i).value = "");
+      this.renderTeamList();
+      this.toast(`${role === "admin" ? "Administrator" : "Counselor"} account created. Share the sign-in details privately.`);
+      return;
+    }
+    const salt = newSalt();
+    const users = DB.read("calmio_users", []);
+    users.push({
+      id: uid(), name: username, email, display: fullname, role,
+      salt, passHash: await makeHash(pass, salt),
+      profile: { fullName: fullname }, lockMinutes: 10
+    });
+    DB.write("calmio_users", users);
+    ["ta-username", "ta-email", "ta-fullname", "ta-pass"].forEach(i => document.getElementById(i).value = "");
+    this.renderTeamList();
+    this.toast(`${role === "admin" ? "Administrator" : "Counselor"} account created. Share the sign-in details privately.`);
+  },
+
+  renderTeamList() {
+    const team = DB.read("calmio_users", []).filter(u => u.role !== "student");
+    document.getElementById("team-list").innerHTML = team.map(u => `
+      <div class="list-item">
+        <b>${esc(disp(u))}</b> <span class="pill">${u.role === "teacher" ? "counselor" : "admin"}</span>
+        <div class="tiny">${esc(u.name)}${u.email ? " \u00b7 " + esc(u.email) : ""}</div>
+        ${u.id !== this.me.id ? `<button class="linklike" onclick="app.removeTeamAccount('${u.id}')">Remove account</button>` : `<span class="tiny">(you)</span>`}
+      </div>`).join("");
+  },
+
+  async removeTeamAccount(id) {
+    const u = DB.read("calmio_users", []).find(x => x.id === id);
+    if (!u || u.id === this.me.id) return;
+    if (!confirm(`Remove the account "${disp(u)}"? Their availability and published articles stay; they just can't sign in anymore.`)) return;
+    if (Remote.on) {
+      const res = await Remote.staff({ action: "remove", target: id });
+      if (res.error) { this.toast(res.error); return; }
+      await Remote.loadAll();
+      this.renderTeamList();
+      this.toast("Account removed.");
+      return;
+    }
+    DB.write("calmio_users", DB.read("calmio_users", []).filter(x => x.id !== id));
+    this.renderTeamList();
+    this.toast("Account removed.");
   },
 
   saveSettings() {
@@ -773,7 +1017,7 @@ const app = {
     const reports = DB.read("calmio_reports", []);
     reports.push({
       id: uid(),
-      byName: this.me ? `${this.me.name} (${this.me.role})` : "Not signed in",
+      byName: this.me ? `${disp(this.me)} (${this.me.role})` : "Not signed in",
       body, ts: now()
     });
     DB.write("calmio_reports", reports);
@@ -820,7 +1064,7 @@ const app = {
     this.renderTestimonials();
     const p = this.me.profile || {};
     document.getElementById("student-greeting").textContent =
-      "How's it going, " + (p.nickname || this.me.name) + "?";
+      "How's it going, " + (p.nickname || disp(this.me)) + "?";
 
     // Loves received
     const loves = DB.read("calmio_loves", []).filter(l => l.toId === this.me.id).sort((a, b) => b.ts - a.ts);
@@ -860,7 +1104,7 @@ const app = {
   /* ---------- teacher home ---------- */
   renderTeacherHome() {
     document.getElementById("teacher-greeting").textContent =
-      "How can I help you, " + this.me.name + "?";
+      "How can I help you, " + disp(this.me) + "?";
 
     // Recent messages (every counselor sees all of them)
     const inbox = DB.read("calmio_thoughts", []).sort((a, b) => (b.urgent - a.urgent) || (b.ts - a.ts));
@@ -913,8 +1157,8 @@ const app = {
   identityKey(t) { return (t.anonymous ? "anon:" : "user:") + t.fromId; },
 
   displayNameOf(t) {
-    if (!t.anonymous) return t.fromName;
     const u = DB.read("calmio_users", []).find(x => x.id === t.fromId);
+    if (!t.anonymous) return u ? disp(u) : (t.fromName || "A student");
     return "#" + (u && u.anonId ? u.anonId : "student0000");
   },
 
@@ -1056,7 +1300,7 @@ const app = {
     const rec = this.studentKeys[this.studentIdx];
     if (!rec) return;
     const all = DB.read("calmio_notes", {});
-    (all[rec.key] = all[rec.key] || []).push({ id: uid(), byName: this.me.name, text: body, ts: now() });
+    (all[rec.key] = all[rec.key] || []).push({ id: uid(), byName: disp(this.me), text: body, ts: now() });
     DB.write("calmio_notes", all);
     this.toast("Note added.");
     this.renderStudents();
@@ -1065,7 +1309,7 @@ const app = {
   /* ---------- scheduling (weekly calendar, no setup needed) ---------- */
   renderSchedule() {
     const sel = document.getElementById("sched-teacher");
-    sel.innerHTML = this.teachers().map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
+    sel.innerHTML = this.teachers().map(t => `<option value="${t.id}">${esc(disp(t))}</option>`).join("");
     this.weekOffset = 0;
     this.renderWeek();
     this.renderMySessions();
@@ -1133,10 +1377,10 @@ const app = {
       this.toast("Sorry - that hour was just taken."); this.renderWeek(); return;
     }
     const teacher = this.teachers().find(t => t.id === teacherId);
-    slots.push({ id: uid(), teacherId, teacherName: teacher ? teacher.name : "Counselor",
-                 start: startMs, minutes: 60, bookedBy: this.me.id, bookedName: this.me.name });
+    slots.push({ id: uid(), teacherId, teacherName: teacher ? disp(teacher) : "Counselor",
+                 start: startMs, minutes: 60, bookedBy: this.me.id, bookedName: disp(this.me) });
     DB.write("calmio_slots", slots);
-    this.toast("Session booked with " + (teacher ? teacher.name : "your counselor") + ".");
+    this.toast("Session booked with " + (teacher ? disp(teacher) : "your counselor") + ".");
     this.creditWater("booking");
     this.renderWeek();
     this.renderMySessions();
@@ -1187,7 +1431,7 @@ const app = {
     const lSel = document.getElementById("love-to");
     lSel.innerHTML = DB.read("calmio_users", [])
       .filter(u => u.id !== this.me.id)
-      .map(u => `<option value="${u.id}">${esc(u.name)} (${u.role})</option>`).join("");
+      .map(u => `<option value="${u.id}">${esc(disp(u))} (${u.role === "teacher" ? "counselor" : u.role})</option>`).join("");
   },
 
   shareTab(tab) {
@@ -1203,7 +1447,7 @@ const app = {
     const ev = evaluateMood(body);
     const thoughts = DB.read("calmio_thoughts", []);
     thoughts.push({
-      id: uid(), fromId: this.me.id, fromName: this.me.name,
+      id: uid(), fromId: this.me.id, fromName: disp(this.me),
       toId: "all", anonymous: document.getElementById("thought-anon").checked,
       urgent: false, body, ts: now(), replies: [],
       mood: ev.score, risk: ev.risk
@@ -1223,8 +1467,8 @@ const app = {
     const to = DB.read("calmio_users", []).find(u => u.id === toId);
     const loves = DB.read("calmio_loves", []);
     loves.push({
-      id: uid(), toId, toName: to ? to.name : "",
-      fromName: document.getElementById("love-anon").checked ? "Anonymous" : this.me.name,
+      id: uid(), toId, toName: to ? disp(to) : "",
+      fromName: document.getElementById("love-anon").checked ? "Anonymous" : disp(this.me),
       reason, ts: now()
     });
     DB.write("calmio_loves", loves);
@@ -1268,7 +1512,7 @@ const app = {
     const thoughts = DB.read("calmio_thoughts", []);
     const t = thoughts.find(x => x.id === this.openThoughtId);
     if (!t) return;
-    t.replies.push({ fromId: this.me.id, name: this.me.name, body, ts: now() });
+    t.replies.push({ fromId: this.me.id, name: disp(this.me), body, ts: now() });
     DB.write("calmio_thoughts", thoughts);
     document.getElementById("convo-reply").value = "";
     this.openConvo(t.id, this._convoFrom);
@@ -1330,7 +1574,7 @@ const app = {
     document.getElementById("class-lock").hidden = !p.className;
 
     const av = document.getElementById("account-avatar");
-    av.innerHTML = p.photo ? `<img src="${p.photo}" alt="Your photo" />` : esc(this.me.name.trim()[0].toUpperCase());
+    av.innerHTML = p.photo ? `<img src="${p.photo}" alt="Your photo" />` : esc(disp(this.me).trim()[0].toUpperCase());
 
     document.getElementById("sec-lockmin").value = this.lockMinutes();
     document.getElementById("sec-newpass").value = "";
@@ -1365,12 +1609,14 @@ const app = {
   },
 
   saveProfile() {
+    /* display name follows the full name field */
     const p = this.me.profile = this.me.profile || {};
     p.fullName = document.getElementById("prof-fullname").value.trim();
     p.nickname = document.getElementById("prof-nickname").value.trim();
     p.dob = document.getElementById("prof-dob").value;
     p.hobbies = document.getElementById("prof-hobbies").value.trim();
     p.clubs = document.getElementById("prof-clubs").value.trim();
+    if (p.fullName) this.me.display = p.fullName;
     // School / class: only writable while still empty - fixed afterwards
     if (!p.school)    p.school    = document.getElementById("prof-school").value.trim();
     if (!p.className) p.className = document.getElementById("prof-class").value.trim();
@@ -1390,10 +1636,15 @@ const app = {
     const curPass = document.getElementById("sec-curpass").value;
     if (newPass) {
       if (newPass.length < 6) { this.toast("New password must be at least 6 characters."); return; }
-      const res = await verifyPass(this.me, curPass);
-      if (!res.ok) { this.toast("Current password is wrong - password not changed."); return; }
-      this.me.salt = newSalt();
-      this.me.passHash = await makeHash(newPass, this.me.salt);
+      if (Remote.on) {
+        const res = await Remote.changePassword(curPass, newPass);
+        if (res.error) { this.toast(res.error + " Password not changed."); return; }
+      } else {
+        const res = await verifyPass(this.me, curPass);
+        if (!res.ok) { this.toast("Current password is wrong - password not changed."); return; }
+        this.me.salt = newSalt();
+        this.me.passHash = await makeHash(newPass, this.me.salt);
+      }
       this.toast("Password changed and security settings saved.");
     } else {
       this.toast("Security settings saved.");
@@ -1451,13 +1702,31 @@ const app = {
       const testimonials = DB.read("calmio_testimonials", []);
       testimonials.unshift({
         id: uid(),
-        name: p.nickname || this.me.name,
+        name: p.nickname || disp(this.me),
         photo: p.photo || null,
         rating: d.rating,
         message: d.message,
         ts: now()
       });
       DB.write("calmio_testimonials", testimonials.slice(0, 20));
+    }
+
+    if (Remote.on) {
+      // Feedback/testimonial rows above were already pushed. The account
+      // itself (and everything tied to it, via cascades) is removed by a
+      // server function holding the service-role key.
+      Remote.deleteAccount().then(res => {
+        if (res.error) { this.toast("Deleting on the server failed: " + res.error); }
+      });
+      Remote.signOut();
+      this.closeDelete();
+      this.me = null;
+      document.getElementById("topbar").hidden = true;
+      this.authTab("login");
+      this.show("welcome");
+      this.renderTestimonials();
+      this.toast("Your account has been deleted. Take care of yourself.");
+      return;
     }
 
     // Remove the account and everything tied to it
@@ -1479,6 +1748,7 @@ const app = {
     this.closeDelete();
     this.me = null;
     document.getElementById("topbar").hidden = true;
+    this.authTab("login");
     this.show("welcome");
     this.renderTestimonials();
     this.toast("Your account has been deleted. Take care of yourself.");
@@ -1504,6 +1774,7 @@ const app = {
 
   /* ---------- emergency ---------- */
   renderEmergency() {
+    document.getElementById("crisis-lines-list").innerHTML = crisisLinesHTML();
     // Counselor line appears here during school hours (set by an administrator)
     document.getElementById("crisis-counselor-slot").innerHTML = counselorLine();
   },
@@ -1514,7 +1785,7 @@ const app = {
     const ev = evaluateMood(body);
     const thoughts = DB.read("calmio_thoughts", []);
     thoughts.push({
-      id: uid(), fromId: this.me.id, fromName: this.me.name,
+      id: uid(), fromId: this.me.id, fromName: disp(this.me),
       toId: "all", anonymous: false, urgent: true, body, ts: now(), replies: [],
       mood: ev.score, risk: ev.risk
     });
@@ -1539,23 +1810,7 @@ const app = {
   checkinAnswer(answer) {
     if (answer === "yes") {
       document.getElementById("checkin-lines").innerHTML =
-        counselorLine() +
-        `<div class="crisis-line">
-          <div><b>988 Suicide &amp; Crisis Lifeline</b><br /><span class="tiny">Call or text 988 - 24/7, free, confidential</span></div>
-          <a class="call-btn" href="tel:988">Call 988</a>
-        </div>
-        <div class="crisis-line">
-          <div><b>Teen Line</b> - teens helping teens<br /><span class="tiny">6-9 PM Pacific, or text TEEN to 839863</span></div>
-          <a class="call-btn" href="tel:8008528336">Call Teen Line</a>
-        </div>
-        <div class="crisis-line">
-          <div><b>Crisis Text Line</b><br /><span class="tiny">Text HOME to 741741, any time</span></div>
-          <a class="call-btn" href="sms:741741&body=HOME">Text 741741</a>
-        </div>
-        <div class="crisis-line">
-          <div><b>Immediate danger</b><br /><span class="tiny">If your safety or someone else's is at risk right now</span></div>
-          <a class="call-btn" href="tel:911">Call 911</a>
-        </div>`;
+        counselorLine() + crisisLinesHTML();
       document.getElementById("checkin-step1").hidden = true;
       document.getElementById("checkin-step2").hidden = false;
     } else if (answer === "help") {
@@ -1572,13 +1827,32 @@ const app = {
      to YOUR OWN server endpoint (e.g. a Netlify/Vercel serverless
      function) that holds the API key. Never put an API key in this
      file - anyone can read client-side JavaScript.               */
-  sendChat() {
+  async sendChat() {
     const input = document.getElementById("chat-input");
     const text = input.value.trim();
     if (!text) return;
     input.value = "";
     this.addChat(text, "user");
-    setTimeout(() => this.addChat(this.demoReply(text), "bot"), 500);
+    // Try the school's own AI endpoint first (netlify/functions/chat.js,
+    // deployed with the site - see DEPLOYMENT.md). If it isn't deployed or
+    // doesn't answer within 9 seconds, fall back to the built-in demo script.
+    let reply = "";
+    try {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 9000);
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+        signal: ctl.signal
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json();
+        reply = (data.reply || "").trim();
+      }
+    } catch (e) { /* endpoint not deployed - use the demo */ }
+    this.addChat(reply || this.demoReply(text), "bot");
   },
 
   addChat(text, who) {
@@ -1812,6 +2086,25 @@ function gardenScene(flowersMarkup) {
     <g transform="translate(792 350)"><ellipse rx="13" ry="5" fill="#6f9e63"/><g transform="translate(0 -6)">${flowerHead("star", ["#f2c7d4", "#e5a4b8", "#e8b64c"], 6)}</g></g>
   </g>
 
+  <!-- water tank by the fence: spare water is stored here -->
+  <g class="gtank" transform="translate(160 288)">
+    <path d="M-25 -34 h50 v6 h-50 z" fill="#b08d5f"/>
+    <path d="M-22 -28 C-24 -6 -24 6 -20 14 h40 C24 6 24 -6 22 -28 Z" fill="#c9a878"/>
+    <path d="M-22 -28 C-24 -6 -24 6 -20 14 h8 C-16 6 -16 -6 -15 -28 Z" fill="#bd9a6b"/>
+    <rect x="-23" y="-22" width="46" height="4" rx="2" fill="#8a6647"/>
+    <rect x="-22" y="2"   width="44" height="4" rx="2" fill="#8a6647"/>
+    <ellipse cx="0" cy="-31" rx="22" ry="4.5" fill="#9dc4d1"/>
+    <ellipse cx="-6" cy="-32" rx="9" ry="1.8" fill="#eaf4f6" opacity="0.7" class="gtank-shimmer"/>
+    <path d="M20 -6 h7 v4 h-4 v5 h-3 z" fill="#8f8a82"/>
+    <circle cx="25" cy="8" r="1.6" fill="#9dc4d1" class="gtank-drip"/>
+    <g transform="translate(0 -46)">
+      <rect x="-26" y="-13" width="52" height="19" rx="6" fill="#fffdf8" stroke="#c9a878" stroke-width="1.6"/>
+      <path d="M-13 -9 c0 3.4 -2.5 4.6 -2.5 6.8 a2.5 2.5 0 0 0 5 0 C-10.5 -4.4 -13 -5.6 -13 -9 Z" fill="#7fb0c4"/>
+      <text id="gtank-count" x="6" y="1.5" text-anchor="middle" font-size="12" font-weight="700"
+            fill="#6e4534" font-family="Georgia, serif">0</text>
+    </g>
+  </g>
+
   <!-- stones + grass tufts -->
   <ellipse cx="205" cy="285" rx="14" ry="7" fill="#c9c2b4"/><ellipse cx="228" cy="290" rx="9" ry="5" fill="#d6cfc0"/>
   <ellipse cx="600" cy="450" rx="16" ry="7" fill="#c9c2b4"/>
@@ -1861,12 +2154,12 @@ Object.assign(app, {
   },
   gardenCap(g) { return g.flowers.length + GARDEN_CAP_BONUS; },
 
-  /* ---------- earning ---------- */
+  /* ---------- earning: water arrives and the garden drinks by itself ---------- */
   creditWater(kind) {
     if (!this.me || this.me.role !== "student" || !GARDEN_BASE[kind]) return;
     const g = this.gardenFor();
     const t = gToday();
-    if (g.credited[kind] === t) return;
+    if (g.credited[kind] === t) { this._autoWater(g, false); return; }
     if (g.earnedDate !== t) { g.earnedDate = t; g.earnedToday = 0; }
     const room = Math.max(0, this.gardenCap(g) - g.earnedToday);
     const amt = r1(Math.min(room, GARDEN_BASE[kind] * this.gardenMult(g)));
@@ -1874,66 +2167,27 @@ Object.assign(app, {
     if (amt > 0) {
       g.water = r1(g.water + amt);
       g.earnedToday = r1(g.earnedToday + amt);
-      this.gardenSave(g);
-      setTimeout(() => this.toast(`+${amt} water for your garden`), 600);
-    } else this.gardenSave(g);
+    }
+    this.gardenSave(g);
+    const st = this._autoWater(g, false);
+    if (amt > 0) {
+      const g2 = this.gardenFor();
+      const msg =
+        st === "watered" ? `+${amt} water - your flowers drank today's share. Tank: ${g2.water}.` :
+        st === "already" ? `+${amt} water saved in your garden's tank (${g2.water}).` :
+        `+${amt} water in the tank (${g2.water}) - ${r1(g2.flowers.length - g2.water)} more and the garden waters itself.`;
+      setTimeout(() => this.toast(msg), 600);
+    }
   },
 
-  /* ---------- rendering ---------- */
-  renderGarden() {
-    const g = this.gardenFor();
+  /* If today's watering hasn't happened yet and the tank holds enough,
+     the garden waters itself. Returns "watered" | "already" | "short".
+     quiet=true skips the re-render (used from inside renderGarden). */
+  _autoWater(g, quiet) {
     const t = gToday();
-    const flowers = g.flowers.map((f, i) => {
-      const [x, y] = GARDEN_SPOTS[f.spot % GARDEN_SPOTS.length];
-      const scale = 0.68 + Math.max(0, Math.min(1, (y - 295) / 135)) * 0.5;
-      const pop = this._justPlanted === f.id ? " gpop" : "";
-      return `<g transform="translate(${x} ${y}) scale(${scale.toFixed(2)})"><g class="gflower${pop}" style="animation-delay:${(i * 0.7) % 4}s">${flowerSVG(f)}</g></g>`;
-    }).join("");
-    this._justPlanted = null;
-    document.getElementById("garden-scene").innerHTML = gardenScene(flowers);
-
-    if (g.earnedDate !== t) { g.earnedDate = t; g.earnedToday = 0; this.gardenSave(g); }
-    document.getElementById("gw-balance").textContent = g.water;
-    document.getElementById("gw-earned").textContent = `${g.earnedToday} / ${this.gardenCap(g)}`;
-    document.getElementById("gw-count").textContent = g.flowers.length;
-
-    const btn = document.getElementById("gw-water-btn");
+    if (g.wateredDate === t) return "already";
     const need = g.flowers.length;
-    if (g.wateredDate === t) {
-      btn.disabled = true;
-      btn.textContent = "Watered today - see you tomorrow";
-    } else {
-      btn.disabled = false;
-      btn.textContent = `Water the garden (uses ${need} water)`;
-    }
-
-    const mult = this.gardenMult(g);
-    document.getElementById("garden-earn").innerHTML = Object.keys(GARDEN_BASE).map(k => `
-      <div class="earn-row${g.credited[k] === t ? " done" : ""}">
-        <span class="earn-check">${g.credited[k] === t ? "&#10003;" : ""}</span>
-        <span>${GARDEN_EARN_LABELS[k]}</span>
-        <b>+${r1(GARDEN_BASE[k] * mult)}</b>
-      </div>`).join("") +
-      `<p class="tiny" style="margin-top:8px">Values grow as your garden gets older (currently x${mult}). You can earn up to ${this.gardenCap(g)} water a day - your flowers drink ${need} a day, so a journal entry goes a long way.</p>`;
-
-    const disc = [...new Set(g.discovered)];
-    document.getElementById("garden-collection").innerHTML =
-      `<p class="tiny">${disc.length} of ${FLOWER_SPECIES.length} kinds</p>` +
-      `<div class="coll-grid">` + FLOWER_SPECIES.map((sp, i) => disc.includes(i)
-        ? `<div class="coll-item" title="${sp.name}"><svg viewBox="-16 -46 32 50">${flowerSVG({ sp: i, watered: GROW_DAYS, rot: 0 })}</svg><span>${sp.name}</span></div>`
-        : `<div class="coll-item unknown"><svg viewBox="-16 -46 32 50"><text x="0" y="-14" text-anchor="middle" font-size="20" fill="#c9beac">?</text></svg><span>?</span></div>`).join("") + `</div>`;
-  },
-
-  /* ---------- watering ---------- */
-  waterGarden() {
-    const g = this.gardenFor();
-    const t = gToday();
-    if (g.wateredDate === t) { this.toast("The garden has had its water today. Come back tomorrow."); return; }
-    const need = g.flowers.length;
-    if (g.water < need) {
-      this.toast(`You need ${r1(need - g.water)} more water - a journal entry or a kind note will do it.`);
-      return;
-    }
+    if (g.water < need) return "short";
     g.water = r1(g.water - need);
     g.wateredDate = t;
     const grow = g.flowers.find(f => !f.mature);
@@ -1943,14 +2197,40 @@ Object.assign(app, {
       if (grow.watered >= GROW_DAYS) { grow.mature = true; bloomed = true; }
     }
     this.gardenSave(g);
-    this.renderGarden();
-    this._waterFx();
+    const gardenVisible = !document.getElementById("view-garden").hidden;
+    if (gardenVisible && !quiet) this.renderGarden();
+    if (gardenVisible) setTimeout(() => this._waterFx(), 300);
     if (bloomed) setTimeout(() => this._awardFlower(), 1500);
-    else this.toast("Watered. Your garden is grateful.");
+    return "watered";
+  },
+
+  /* ---------- rendering ---------- */
+  renderGarden() {
+    const g = this.gardenFor();
+    const t = gToday();
+    if (g.earnedDate !== t) { g.earnedDate = t; g.earnedToday = 0; this.gardenSave(g); }
+    this._autoWater(g, true);   // catch up if the tank already holds enough
+    const flowers = g.flowers.map((f, i) => {
+      const [x, y] = GARDEN_SPOTS[f.spot % GARDEN_SPOTS.length];
+      const scale = 0.68 + Math.max(0, Math.min(1, (y - 295) / 135)) * 0.5;
+      const pop = this._justPlanted === f.id ? " gpop" : "";
+      return `<g transform="translate(${x} ${y}) scale(${scale.toFixed(2)})"><g class="gflower${pop}" style="animation-delay:${(i * 0.7) % 4}s">${flowerSVG(f)}</g></g>`;
+    }).join("");
+    this._justPlanted = null;
+    document.getElementById("garden-scene").innerHTML = gardenScene(flowers);
+    document.getElementById("gtank-count").textContent = g.water;
+
+    const disc = [...new Set(g.discovered)];
+    document.getElementById("garden-collection").innerHTML =
+      `<p class="tiny">${disc.length} of ${FLOWER_SPECIES.length} kinds</p>` +
+      `<div class="coll-grid">` + FLOWER_SPECIES.map((sp, i) => disc.includes(i)
+        ? `<div class="coll-item" title="${sp.name}"><svg viewBox="-16 -46 32 50">${flowerSVG({ sp: i, watered: GROW_DAYS, rot: 0 })}</svg><span>${sp.name}</span></div>`
+        : `<div class="coll-item unknown"><svg viewBox="-16 -46 32 50"><text x="0" y="-14" text-anchor="middle" font-size="20" fill="#c9beac">?</text></svg><span>?</span></div>`).join("") + `</div>`;
   },
 
   _waterFx() {
     const wrap = document.getElementById("garden-scene");
+    if (!wrap || !wrap.firstChild) return;
     const fx = document.createElement("div");
     fx.className = "water-fx";
     for (let i = 0; i < 14; i++) {

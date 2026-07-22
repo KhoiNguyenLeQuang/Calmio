@@ -6,7 +6,7 @@
   <!-- Content Security Policy: blocks foreign scripts and stops data from being sent
        to any other domain, even if an attacker manages to inject markup. -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+        content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'" />
   <meta name="referrer" content="no-referrer" />
   <title>Calmio - Student Mental Health Hub</title>
   <link rel="icon" type="image/svg+xml"
@@ -44,26 +44,56 @@
   <!-- ======= Welcome / sign in ======= -->
   <section class="view" id="view-welcome">
     <div class="welcome-wrap">
+
+      <!-- Sign in -->
       <form class="hero" id="login-form" method="post" action="#"
             onsubmit="app.login();return false">
         <h1>Welcome to Calmio</h1>
         <p class="muted">A calm space for students to share what's on their mind, send appreciation, book time with a counselor, and find support - and for counselors to listen well.</p>
-        <label for="welcome-name">Your name</label>
-        <input type="text" id="welcome-name" name="username" placeholder="Sam"
-               maxlength="40" autocomplete="username" autocapitalize="words" />
-        <label for="welcome-pass">Password</label>
-        <input type="password" id="welcome-pass" name="current-password" placeholder="At least 6 characters"
-               maxlength="64" autocomplete="current-password" />
-        <p class="tiny">New here? The password you type now becomes your account password. It is never stored as readable text.</p>
-        <label>I am a...</label>
-        <div class="role-row">
-          <button type="button" id="role-student" onclick="app.pickRole('student')">Student</button>
-          <button type="button" id="role-teacher" onclick="app.pickRole('teacher')">Teacher</button>
-          <button type="button" id="role-admin" onclick="app.pickRole('admin')">Administrator</button>
-        </div>
-        <button type="submit" class="btn">Enter Calmio</button>
+        <label for="login-id">Username or email</label>
+        <input type="text" id="login-id" name="username" placeholder="minhanh.nguyen"
+               maxlength="80" autocomplete="username" required />
+        <label for="login-pass">Password</label>
+        <input type="password" id="login-pass" name="current-password" placeholder="Your password"
+               maxlength="64" autocomplete="current-password" required />
+        <button type="submit" class="btn">Sign in</button>
         <p class="tiny" id="lockout-msg" style="color:var(--signal)"></p>
+        <p class="tiny">New here? <button type="button" class="linklike" onclick="app.authTab('signup')">Create a student account</button></p>
       </form>
+
+      <!-- Create account (students) -->
+      <form class="hero" id="signup-form" method="post" action="#" hidden
+            onsubmit="app.register();return false">
+        <h1>Create your account</h1>
+        <p class="muted">For students. Counselor and administrator accounts are created by your school's administrator.</p>
+        <label for="su-username">Username</label>
+        <input type="text" id="su-username" name="username" placeholder="minhanh.nguyen"
+               maxlength="20" autocomplete="username" required />
+        <p class="tiny">3-20 characters: lowercase letters, numbers, dots, dashes.</p>
+        <label for="su-email">Email</label>
+        <input type="email" id="su-email" name="email" placeholder="you@hanoihigh.edu.vn"
+               maxlength="80" autocomplete="email" oninput="app.suggestSchool()" required />
+        <label for="su-fullname">Full name</label>
+        <input type="text" id="su-fullname" name="name" placeholder="Nguyen Minh Anh"
+               maxlength="60" autocomplete="name" required />
+        <label for="su-school">School</label>
+        <input type="text" id="su-school" placeholder="Filled automatically from a school email"
+               maxlength="80" required />
+        <label for="su-pass">Password</label>
+        <input type="password" id="su-pass" name="new-password" placeholder="At least 6 characters"
+               maxlength="64" autocomplete="new-password" required />
+        <label for="su-pass2">Confirm password</label>
+        <input type="password" id="su-pass2" placeholder="Type it again"
+               maxlength="64" autocomplete="new-password" required />
+        <div class="toggle-row" style="margin-top:12px">
+          <input type="checkbox" id="su-agree" required style="width:18px;height:18px;margin:0" />
+          <label for="su-agree" style="margin:0;font-weight:400;font-size:0.85rem">I have read the <button type="button" class="linklike" onclick="app.openPrivacy()">privacy policy</button> and, if I am under 18, my parent or guardian knows I am using Calmio.</label>
+        </div>
+        <button type="submit" class="btn">Create account</button>
+        <p class="tiny" id="signup-msg" style="color:var(--signal)"></p>
+        <p class="tiny">Already have an account? <button type="button" class="linklike" onclick="app.authTab('login')">Sign in</button></p>
+      </form>
+
     </div>
   </section>
 
@@ -343,6 +373,33 @@
       <button class="btn" onclick="app.saveSettings()">Save settings</button>
     </div>
     <div class="card" style="max-width:640px">
+      <h2>Crisis lines</h2>
+      <p class="muted">Shown on the Emergency page and in the safety check-in. Defaults are Vietnam's national numbers - replace or add your local services and keep them up to date.</p>
+      <div id="crisis-editor"></div>
+      <button class="btn secondary small" onclick="app.addCrisisLine()">Add a line</button>
+      <button class="btn" onclick="app.saveCrisisLines()">Save crisis lines</button>
+    </div>
+    <div class="card" style="max-width:640px">
+      <h2>Team accounts</h2>
+      <p class="muted">Counselor and administrator accounts can only be created here - never from the public sign-up page. Give the person their username and temporary password privately, and ask them to change it in the account manager.</p>
+      <label for="ta-username">Username</label>
+      <input type="text" id="ta-username" maxlength="20" placeholder="counselor.rivera" autocomplete="off" />
+      <label for="ta-email">Email</label>
+      <input type="email" id="ta-email" maxlength="80" placeholder="rivera@hanoihigh.edu.vn" autocomplete="off" />
+      <label for="ta-fullname">Full name</label>
+      <input type="text" id="ta-fullname" maxlength="60" placeholder="Ms. Rivera" autocomplete="off" />
+      <label for="ta-role">Role</label>
+      <select id="ta-role">
+        <option value="teacher">Counselor / teacher</option>
+        <option value="admin">Administrator</option>
+      </select>
+      <label for="ta-pass">Temporary password</label>
+      <input type="text" id="ta-pass" maxlength="64" placeholder="At least 6 characters" autocomplete="off" />
+      <button class="btn" onclick="app.createTeamAccount()">Create account</button>
+      <h3 class="subhead" style="margin-top:20px">Existing team accounts</h3>
+      <div id="team-list"></div>
+    </div>
+    <div class="card" style="max-width:640px">
       <h2>Problem reports</h2>
       <p class="muted">Anyone can report a problem with the website using the round button in the bottom-right corner. Reports arrive here.</p>
       <div id="admin-reports"></div>
@@ -353,21 +410,10 @@
   <section class="view" id="view-emergency">
     <div class="crisis-box">
       <h2>You deserve support right now</h2>
-      <p>If you are thinking about suicide or hurting yourself, or you're worried about a friend, you can talk to someone immediately - free, confidential, 24/7. You don't need to be in crisis to call.</p>
-      <div class="crisis-line">
-        <div><b>988 Suicide &amp; Crisis Lifeline</b> (US)<br /><span class="tiny">Call or text, any time</span></div>
-        <a class="call-btn" href="tel:988">Call 988</a>
-      </div>
-      <div class="crisis-line">
-        <div><b>Crisis Text Line</b><br /><span class="tiny">Text HOME to 741741</span></div>
-        <a class="call-btn" href="sms:741741&body=HOME">Text 741741</a>
-      </div>
+      <p>If you are thinking about suicide or hurting yourself, or you're worried about a friend, you can talk to someone immediately - free and confidential. You don't need to be in crisis to call.</p>
+      <div id="crisis-lines-list"></div>
       <div id="crisis-counselor-slot"></div>
-      <div class="crisis-line">
-        <div><b>Immediate danger</b><br /><span class="tiny">If someone's safety is at risk right now</span></div>
-        <a class="call-btn" href="tel:911">Call 911</a>
-      </div>
-      <p class="tiny" style="margin-top:12px">Tapping a button dials from your device - this website can't place a call for you. School administrators: replace these with your region's numbers and your counselor's line before real use.</p>
+      <p class="tiny" style="margin-top:12px">Tapping a button dials from your device - this website can't place a call for you. Administrators can edit these numbers in School settings.</p>
     </div>
 
     <div class="card" style="max-width:640px">
@@ -386,7 +432,7 @@
       <h1>AI Helper for Teachers</h1>
       <p class="muted">Think through how to respond to a student situation. It offers perspective - your counselor and your judgment always come first.</p>
       <div class="demo-banner">
-        <b>Demo mode:</b> replies here come from a small built-in script, not a real AI. The README explains how to connect a real AI model safely when you're ready.
+        <b>Note:</b> if your school has deployed the AI endpoint (see DEPLOYMENT.md), replies come from a real AI model. Otherwise a small built-in demo script answers. Either way, your counselor and your judgment come first.
       </div>
       <div class="chatlog" id="chatlog">
         <div class="chatrow"><div class="chatmsg">Hi! Describe a situation with a student and I'll help you think it through. For example: "A student is feeling anxiety - should I make the test easier?"</div></div>
@@ -402,21 +448,9 @@
   <section class="view" id="view-garden">
     <div class="card" style="max-width:900px;margin:0 auto">
       <h1>Your garden</h1>
-      <p class="muted">A quiet corner that grows with you. Every day you look after yourself here - writing, appreciating someone, booking time to talk - you earn water for your flowers. There is no losing and no hurry: a thirsty flower simply waits for you.</p>
+      <p class="muted">A quiet corner that grows with you - no buttons to press. Whenever you look after yourself here (writing a journal entry, sending someone appreciation, booking a session, or simply visiting), water arrives and your flowers drink it by themselves. Whatever they don't need is kept in the little tank by the fence. There is no losing and no hurry: a thirsty flower simply waits for you.</p>
 
       <div class="garden-wrap" id="garden-scene"></div>
-
-      <div class="garden-bar">
-        <div class="garden-stats">
-          <div class="gstat"><span class="tiny">Water</span><b id="gw-balance">0</b></div>
-          <div class="gstat"><span class="tiny">Earned today</span><b id="gw-earned">0 / 0</b></div>
-          <div class="gstat"><span class="tiny">Flowers</span><b id="gw-count">1</b></div>
-        </div>
-        <button class="btn" id="gw-water-btn" onclick="app.waterGarden()">Water the garden</button>
-      </div>
-
-      <h2 style="margin-top:24px">How to earn water today</h2>
-      <div id="garden-earn"></div>
 
       <h2 style="margin-top:24px">Flowers you've discovered</h2>
       <div class="garden-collection" id="garden-collection"></div>
@@ -447,11 +481,13 @@
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="privacy-title">
     <h2 id="privacy-title">Our privacy policy</h2>
     <div class="privacy-body">
-      <p><b>What Calmio keeps.</b> Your account name, profile, messages to the counseling team, appreciation notes, and booked sessions. Nothing more.</p>
+      <p><b>What Calmio keeps.</b> Your username, email address, real name, school, profile, messages to the counseling team, appreciation notes, booked sessions, and your garden. Nothing more.</p>
       <p><b>How it is protected.</b> Everything is encrypted before it is stored, and your password is never saved in a readable form. Sign-in pauses after repeated wrong guesses, and Calmio locks itself when you step away. Closing the page signs you out completely.</p>
       <p><b>Who can see what.</b> Thoughts you share go only to the school's counselors. If you send a message anonymously, counselors only ever see a code name - never who you are. Your photo and nickname are shown publicly only if you clearly say yes when leaving Calmio.</p>
       <p><b>What Calmio never does.</b> It never sells data, never shares it outside your school's counseling team, and never sends your information to any other website.</p>
-      <p><b>Your choices.</b> You can delete your account at any time from the account manager; this permanently removes your profile, messages, and sessions.</p>
+      <p><b>Your choices.</b> You can delete your account at any time from the account manager; this permanently removes your profile, messages, sessions, and garden.</p>
+      <p><b>For parents and the school.</b> Calmio is run by the school for its students. Because most users are minors, the school informs parents or guardians about the service and how their child's information is handled, in line with Vietnam's personal data protection rules. Questions go to the school administrator.</p>
+      <p class="tiny">This is a draft policy. The school must review and adapt it (ideally with legal advice) before real use.</p>
     </div>
     <button class="btn secondary" onclick="app.closePrivacy()">Close</button>
   </div>
@@ -573,6 +609,9 @@
 </div>
 
 <div class="toast" id="toast"></div>
+<script src="js/config.js"></script>
+<script src="js/vendor/supabase.js"></script>
+<script src="js/remote.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

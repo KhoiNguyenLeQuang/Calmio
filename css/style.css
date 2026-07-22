@@ -976,3 +976,28 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
   .garden-stats { justify-content: space-between; }
   .coll-grid { grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); }
 }
+
+/* ---------- Crisis line editor (admin) ---------- */
+.crisis-edit-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1.4fr 90px auto;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.crisis-edit-row input { margin: 0; }
+@media (max-width: 700px) {
+  .crisis-edit-row { grid-template-columns: 1fr 1fr; }
+  .crisis-edit-row .crisis-num { grid-column: 1; }
+}
+
+/* water tank shimmer + drip */
+.gtank-shimmer { animation: gtankshine 4s ease-in-out infinite; }
+@keyframes gtankshine { 0%,100% { opacity: 0.35; } 50% { opacity: 0.8; } }
+.gtank-drip { animation: gtankdrip 3.5s ease-in infinite; }
+@keyframes gtankdrip {
+  0%, 55% { transform: translateY(0); opacity: 0; }
+  60% { opacity: 0.9; }
+  90%, 100% { transform: translateY(11px); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .gtank-shimmer, .gtank-drip { animation: none !important; } }
