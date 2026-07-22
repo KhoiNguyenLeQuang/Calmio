@@ -11,6 +11,6 @@
    protection is Row Level Security in the database.
    ============================================================ */
 window.CALMIO_REMOTE = {
-  url: "https://supabase.com/dashboard/project/mgjbahhmvteakzpvfepq",        // e.g. "https://abcdefghijk.supabase.co"
+  url: "https://mgjbahhmvteakzpvfepq.supabase.co",        // e.g. "https://abcdefghijk.supabase.co"
   anonKey: "sb_publishable_N6HWYi2qxa31kA7To6nxMw_akfqt-fQ"     // the long "anon / public" key
 };
