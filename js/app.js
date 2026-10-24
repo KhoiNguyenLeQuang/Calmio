@@ -624,11 +624,27 @@ const app = {
   async init() {
     if (this.isDemo()) {
       await seed();
+      // A browser that visited an older Calmio still holds old sample data
+      // (different account names), and seed() never overwrites existing
+      // data. If the demo accounts are missing, wipe and re-seed.
+      if (!this.demoUser("student")) {
+        Vault.cache = {};
+        try {
+          localStorage.removeItem("calmio_vault");
+          localStorage.removeItem("calmio_vault_plain");
+        } catch {}
+        await seed();
+      }
       migrateData();
       let role = "student";
       try { role = sessionStorage.getItem("calmio_demo_role") || "student"; } catch {}
       this.me = this.demoUser(role) || this.demoUser("student");
-      document.getElementById("signout-btn").hidden = true;
+      const so = document.getElementById("signout-btn");
+      if (so) so.hidden = true;
+      if (!this.me) {                            // never leave a blank page
+        this.show("welcome");
+        return;
+      }
       this.renderTestimonials();
       const stars0 = document.getElementById("del-stars");
       stars0.innerHTML = [1, 2, 3, 4, 5].map(n =>
