@@ -277,13 +277,13 @@ async function seed() {
   DB.write("calmio_articles", [
     { id: uid(), title: "What to do when a friend is dealing with anxiety?",
       url: "https://www.nimh.nih.gov/health/topics/anxiety-disorders",
-      keywords: "Anxiety, Friendship", minutes: 2, byName: t3.name, ts: now() - 864e5 },
+      keywords: "Anxiety, Friendship", minutes: 2, byName: disp(t3), ts: now() - 864e5 },
     { id: uid(), title: "How to do box-breathing techniques?",
       url: "https://www.youtube.com/watch?v=tEmt1Znux58",
-      keywords: "Anxiety, Stress, Life Skills", minutes: 2, byName: t1.name, ts: now() - 2 * 864e5 },
+      keywords: "Anxiety, Stress, Life Skills", minutes: 2, byName: disp(t1), ts: now() - 2 * 864e5 },
     { id: uid(), title: "How to deal with anxiety during a game?",
       url: "https://www.apa.org/topics/anxiety",
-      keywords: "Sports, Pressure", minutes: 5, byName: t3.name, ts: now() - 7 * 864e5 }
+      keywords: "Sports, Pressure", minutes: 5, byName: disp(t3), ts: now() - 7 * 864e5 }
   ]);
   /* ----- Synthetic demo students (so the Students tab has something to show).
          Delete this block before real use. ----- */
@@ -370,24 +370,24 @@ async function seed() {
   DB.write("calmio_reports", []);
   DB.write("calmio_notes", {
     ["user:" + s1.id]: [
-      { id: uid(), byName: t1.name, text: "Met after class - built a two-week revision plan, introduced box breathing. Check in after exams.", ts: now() - 23 * D },
-      { id: uid(), byName: t1.name, text: "Exams done, mood visibly brighter. Moving to monthly light check-ins.", ts: now() - 5 * D }
+      { id: uid(), byName: disp(t1), text: "Met after class - built a two-week revision plan, introduced box breathing. Check in after exams.", ts: now() - 23 * D },
+      { id: uid(), byName: disp(t1), text: "Exams done, mood visibly brighter. Moving to monthly light check-ins.", ts: now() - 5 * D }
     ],
     ["anon:" + s3.id]: [
-      { id: uid(), byName: t3.name, text: "Anonymous student, three messages with a downward trend. Latest message flagged by the AI - keeping lunch hours open and will gently invite again in my next reply.", ts: now() - 3 * D }
+      { id: uid(), byName: disp(t3), text: "Anonymous student, three messages with a downward trend. Latest message flagged by the AI - keeping lunch hours open and will gently invite again in my next reply.", ts: now() - 3 * D }
     ],
     ["user:" + s4.id]: [
-      { id: uid(), byName: t2.name, text: "Role-played the conversation with his friend. He followed through and it resolved well.", ts: now() - 4 * D }
+      { id: uid(), byName: disp(t2), text: "Role-played the conversation with his friend. He followed through and it resolved well.", ts: now() - 4 * D }
     ],
     ["user:" + s7.id]: [
-      { id: uid(), byName: t3.name, text: "Pattern: overload -> delegate -> relief -> overload again. Working with her on saying no earlier, and asked the council advisor to watch her workload.", ts: now() - 7 * D }
+      { id: uid(), byName: disp(t3), text: "Pattern: overload -> delegate -> relief -> overload again. Working with her on saying no earlier, and asked the council advisor to watch her workload.", ts: now() - 7 * D }
     ],
     ["user:" + s8.id]: [
-      { id: uid(), byName: t2.name, text: "Family meeting held, weekly subject plan agreed. Parents on board with grades-off dinners.", ts: now() - 32 * D },
-      { id: uid(), byName: t2.name, text: "Six weeks steady improvement. Moving from weekly to fortnightly check-ins.", ts: now() - 6 * D }
+      { id: uid(), byName: disp(t2), text: "Family meeting held, weekly subject plan agreed. Parents on board with grades-off dinners.", ts: now() - 32 * D },
+      { id: uid(), byName: disp(t2), text: "Six weeks steady improvement. Moving from weekly to fortnightly check-ins.", ts: now() - 6 * D }
     ],
     ["user:" + s9.id]: [
-      { id: uid(), byName: t1.name, text: "Guarded, minimal messages, mood readings hover at neutral. Not pushing - keeping a light, reliable presence so the door stays open.", ts: now() - 1.5 * D }
+      { id: uid(), byName: disp(t1), text: "Guarded, minimal messages, mood readings hover at neutral. Not pushing - keeping a light, reliable presence so the door stays open.", ts: now() - 1.5 * D }
     ]
   });
 }
@@ -581,7 +581,61 @@ const app = {
   studentQuery: "",
   _convoFrom: null,      // where the convo view was opened from
 
+  /* ---------- demo mode (window.CALMIO_DEMO in js/config.js) ----------
+     Visitors skip sign-in and sign-up entirely and land inside the app
+     with the built-in sample data. Everything stays in their own browser;
+     Supabase is never contacted. A switcher in the top bar lets them view
+     the site as a student, a counselor, or the administrator. */
+  isDemo() { return !!window.CALMIO_DEMO; },
+  DEMO_USERS: { student: "minhanh.nguyen", teacher: "dr.lori", admin: "admin" },
+
+  demoUser(role) {
+    const name = this.DEMO_USERS[role] || this.DEMO_USERS.student;
+    return DB.read("calmio_users", []).find(u => u.name === name) || null;
+  },
+
+  switchDemoRole(role) {
+    const u = this.demoUser(role);
+    if (!u) return;
+    try { sessionStorage.setItem("calmio_demo_role", role); } catch {}
+    this.me = u;
+    this.enter();
+  },
+
+  renderDemoSwitch() {
+    const el = document.getElementById("demo-switch");
+    if (!el) return;
+    el.hidden = !this.isDemo();
+    if (!this.isDemo() || !this.me) return;
+    el.querySelectorAll("button").forEach(b =>
+      b.classList.toggle("active", b.dataset.role === this.me.role));
+  },
+
+  /* Wipes the sample data in this browser and starts fresh. */
+  resetDemo() {
+    try {
+      localStorage.removeItem("calmio_vault");
+      localStorage.removeItem("calmio_vault_plain");
+      sessionStorage.removeItem("calmio_demo_role");
+    } catch {}
+    location.reload();
+  },
+
   async init() {
+    if (this.isDemo()) {
+      await seed();
+      migrateData();
+      let role = "student";
+      try { role = sessionStorage.getItem("calmio_demo_role") || "student"; } catch {}
+      this.me = this.demoUser(role) || this.demoUser("student");
+      document.getElementById("signout-btn").hidden = true;
+      this.renderTestimonials();
+      const stars0 = document.getElementById("del-stars");
+      stars0.innerHTML = [1, 2, 3, 4, 5].map(n =>
+        `<button type="button" onclick="app.setStars(${n})" aria-label="${n} star${n > 1 ? "s" : ""}">${starSvg(22)}</button>`).join("");
+      if (this.me) this.enter();
+      return;                                    // no auto-lock in the demo
+    }
     if (Remote.configure()) {
       // Multi-user mode: Supabase is the source of truth. Sessions live in
       // sessionStorage (closing the tab signs you out), restored here.
@@ -627,7 +681,7 @@ const app = {
   },
 
   lockNow() {
-    if (!this.me) return;
+    if (!this.me || this.isDemo()) return;
     this.locked = true;
     document.getElementById("lock-pass").value = "";
     document.getElementById("lock-msg").textContent = "";
@@ -806,6 +860,7 @@ const app = {
   },
 
   logout() {
+    if (this.isDemo()) return;                 // nothing to sign out of in the demo
     if (Remote.on) Remote.signOut();
     sessionStorage.removeItem("calmio_session");
     this.me = null;
@@ -822,6 +877,7 @@ const app = {
     document.getElementById("whoami-name").textContent = disp(this.me) + " \u00b7 " + (this.me.role === "teacher" ? "counselor" : this.me.role);
     this._lastActivity = now();
     this.buildNav();
+    this.renderDemoSwitch();
     this.backHome();
     this.creditWater("login");
     if (Remote.on) Remote.startPolling(() => {
@@ -1709,6 +1765,14 @@ const app = {
         ts: now()
       });
       DB.write("calmio_testimonials", testimonials.slice(0, 20));
+    }
+
+    if (this.isDemo()) {
+      // Demo: show the whole flow without destroying the sample account.
+      this.closeDelete();
+      this.backHome();
+      this.toast("Demo only - in the real app this account would now be deleted. 5-star kind words appear under \"People we have helped\".");
+      return;
     }
 
     if (Remote.on) {

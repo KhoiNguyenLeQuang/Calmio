@@ -20,6 +20,15 @@
 
 <div class="shell">
 
+  <!-- Demo only: view the site as each role (shown when CALMIO_DEMO is on) -->
+  <div class="demo-switch" id="demo-switch" role="group" aria-label="View the demo as" hidden>
+    <span class="demo-switch-label">Demo &middot; viewing as</span>
+    <button type="button" data-role="student" onclick="app.switchDemoRole('student')">Student</button>
+    <button type="button" data-role="teacher" onclick="app.switchDemoRole('teacher')">Counselor</button>
+    <button type="button" data-role="admin" onclick="app.switchDemoRole('admin')">Admin</button>
+    <button type="button" class="demo-reset" onclick="app.resetDemo()" title="Erase changes and restore the sample data">Reset</button>
+  </div>
+
   <!-- ======= Top bar ======= -->
   <header class="topbar" id="topbar" hidden>
     <div class="logo" aria-label="Calmio">
@@ -34,7 +43,7 @@
     <div class="whoami">
       <div style="text-align:right">
         <div id="whoami-name" style="font-weight:700"></div>
-        <button class="linklike" onclick="app.logout()">Sign out</button>
+        <button class="linklike" id="signout-btn" onclick="app.logout()">Sign out</button>
       </div>
       <button class="avatar avatar-btn" id="avatar" onclick="app.show('account')"
               title="Open account manager" aria-label="Open account manager">?</button>

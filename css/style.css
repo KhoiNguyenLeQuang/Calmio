@@ -1003,3 +1003,78 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
   90%, 100% { transform: translateY(11px); opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) { .gtank-shimmer, .gtank-drip { animation: none !important; } }
+
+/* ---------- Demo strip (demo mode only): a slim bar above the top bar ---------- */
+.demo-switch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 12px auto 0;
+  padding: 3px;
+  border: 1px solid var(--oat-line);
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+}
+.demo-switch[hidden] { display: none; }
+.demo-switch-label { color: var(--ink-soft); padding: 0 6px 0 10px; white-space: nowrap; }
+.demo-switch button {
+  border: none;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-family: var(--font-display);
+  padding: 4px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.demo-switch button:hover { background: var(--oat); color: var(--ink); }
+.demo-switch button.active { background: var(--cacao); color: #fff; }
+.demo-switch .demo-reset { border-left: 1px solid var(--oat-line); border-radius: 0 999px 999px 0; margin-left: 2px; }
+@media (max-width: 420px) {
+  .demo-switch { border-radius: 14px; }
+  .demo-switch-label { width: 100%; text-align: center; padding: 2px 0 0; }
+}
+
+/* ---------- Students tab: one student's page ---------- */
+#student-page { margin-top: 18px; }
+.student-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid var(--oat-line);
+  border-radius: 14px;
+  background: var(--oat);
+}
+.student-head h2 { font-size: 1.35rem; }
+.student-head .pill { margin-top: 2px; }
+.subhead {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  color: var(--cacao-deep);
+  margin: 26px 0 4px;
+  padding-top: 18px;
+  border-top: 1px solid var(--oat-line);
+}
+.mood-graph {
+  margin-top: 10px;
+  padding: 10px 8px 4px;
+  border: 1px solid var(--oat-line);
+  border-radius: 12px;
+  background: #fff;
+}
+.mood-graph svg { display: block; width: 100%; height: auto; }
+.note-item {
+  padding: 10px 14px;
+  margin-top: 8px;
+  border-left: 3px solid var(--blossom);
+  border-radius: 0 10px 10px 0;
+  background: var(--oat);
+}
+.note-item > div { margin-bottom: 3px; }
